@@ -9,4 +9,5 @@ work_dirs
 实验结果
 save
 *.out
+*.pth
 model_best.pth.tar
