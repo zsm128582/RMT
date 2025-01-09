@@ -1,0 +1,12 @@
+build
+__pycache__
+*.log
+*.egg-info
+path
+data
+work_dirs
+*.egg
+实验结果
+save
+*.out
+model_best.pth.tar

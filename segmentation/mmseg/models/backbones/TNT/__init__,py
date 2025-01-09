@@ -1,0 +1,4 @@
+import TNT
+__all__ = ['TNT'] 
+
+#package1下有file1.py,file2.py

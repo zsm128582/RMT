@@ -27,13 +27,13 @@ import utils
 import os
 
 #import models
-from RMT import RMT_T, RMT_S, RMT_B, RMT_L
+from RMT import RMT_T3, RMT_S, RMT_M2, RMT_L6
 
 archs = {
-            'RMT_T': RMT_T,
+            'RMT_T': RMT_T3,
             'RMT_S': RMT_S,
-            'RMT_B': RMT_B,
-            'RMT_L': RMT_L
+            'RMT_B': RMT_M2,
+            'RMT_L': RMT_L6
          }
 
 def get_args_parser():

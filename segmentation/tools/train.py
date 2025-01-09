@@ -6,7 +6,11 @@ import time
 
 import mmcv
 import torch
+# from mmengine.dist import init_dist
 from mmcv.runner import init_dist
+# from mmengine import Config
+# from mmengine import DictAction
+# from mmengine.utils import get_git_hash
 from mmcv.utils import Config, DictAction, get_git_hash
 
 from mmseg import __version__
@@ -66,6 +70,8 @@ def main():
     cfg = Config.fromfile(args.config)
     if args.options is not None:
         cfg.merge_from_dict(args.options)
+    # print("##################################")
+    # print(cfg)
     # set cudnn_benchmark
     if cfg.get('cudnn_benchmark', False):
         torch.backends.cudnn.benchmark = True
@@ -82,6 +88,7 @@ def main():
         cfg.load_from = args.load_from
     if args.resume_from is not None:
         cfg.resume_from = args.resume_from
+
     if args.gpu_ids is not None:
         cfg.gpu_ids = args.gpu_ids
     else:

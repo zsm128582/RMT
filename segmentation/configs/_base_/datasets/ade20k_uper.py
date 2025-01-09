@@ -3,7 +3,7 @@
 
 # dataset settings
 dataset_type = 'ADE20KDataset'
-data_root = '/mnt/bn/fqh-bytenas-data3/ADEChallengeData2016'
+data_root = '/home/zengshimao/code/RMT/ade/ADEChallengeData2016'
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 crop_size = (512, 512)
@@ -36,7 +36,7 @@ test_pipeline = [
 ]
 data = dict(
     samples_per_gpu=4,
-    workers_per_gpu=4,
+    workers_per_gpu=1,
     train=dict(
         type=dataset_type,
         data_root=data_root,

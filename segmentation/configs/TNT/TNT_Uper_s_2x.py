@@ -1,31 +1,43 @@
 _base_ = [
-    "../_base_/models/RMT_upper.py",
+    "../_base_/models/TNT_upper.py",
     "../_base_/datasets/ade20k_uper.py",
     "../_base_/default_runtime.py",
     "../_base_/schedules/schedule_160k.py",
 ]
 
-# model.pretrained is actually loaded by backbone, see
-# https://github.com/open-mmlab/mmsegmentation/blob/186572a3ce64ac9b6b37e66d58c76515000c3280/mmseg/models/segmentors/encoder_decoder.py#L32
-
+import torch.nn as nn
 model = dict(
     pretrained=None,
-    backbone=dict(
-        embed_dims=[64, 128, 256, 512],
-        depths=[3, 4, 18, 4],
-        num_heads=[4, 4, 8, 16],
-        init_values=[2, 2, 2, 2],
-        heads_ranges=[4, 4, 6, 6],
-        mlp_ratios=[4, 4, 3, 3],
-        drop_path_rate=0.15,
-        chunkwise_recurrents=[True, True, True, False],
-        layerscales=[False, False, False, False],
-        out_indices=(0, 1, 2, 3),
-    ),  # it seems that, upernet requires a larger dpr
-    decode_head=dict(in_channels=[64, 128, 256, 512], num_classes=150),
-    auxiliary_head=dict(in_channels=256, num_classes=150),
+        backbone=dict(
+        type="TNT",
+        img_size=512,#??
+        patch_size=16,
+        in_chans=32,
+        num_classes=1000,
+        outer_dim=384,
+        inner_dim=24,
+        depth=12,
+        outer_num_heads=6,
+        inner_num_heads=4,
+        mlp_ratio=4.0,
+        qkv_bias=False,
+        qk_scale=None,
+        drop_rate=0.0,
+        attn_drop_rate=0.0,
+        drop_path_rate=0.0,
+        inner_stride=4,
+        se=0,
+    ),
+    decode_head=dict(
+        in_channels=[384, 384, 384, 384],
+        num_classes=150,
+        channels=384,
+    ),
+    auxiliary_head=dict(
+        in_channels=384,
+        num_classes=150
+    ), 
 )
-
 
 ############## below we strictly follow uniformer & cswin ####################################
 # https://github.com/Sense-X/UniFormer/blob/main/semantic_segmentation/exp/upernet_global_small/config.py
@@ -70,7 +82,8 @@ evaluation = dict(interval=8000 // (gpu_multipliers), save_best="mIoU")
 
 # NOTE: True is conflict with checkpoint
 # https://github.com/allenai/longformer/issues/63#issuecomment-648861503
-find_unused_parameters = False
+# What the fuck ?
+find_unused_parameters = True
 
 # place holder for new verison mmseg compatiability
 resume_from = None

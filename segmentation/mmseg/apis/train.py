@@ -39,7 +39,6 @@ def train_segmentor(model,
                     meta=None):
     """Launch segmentor training."""
     logger = get_root_logger(cfg.log_level)
-
     # prepare data loaders
     dataset = dataset if isinstance(dataset, (list, tuple)) else [dataset]
     data_loaders = [
