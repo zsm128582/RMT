@@ -26,15 +26,24 @@ from samplers import RASampler
 import utils
 import os
 
-#import models
 from RMT import RMT_T3, RMT_S, RMT_M2, RMT_L6
-
+from vsa import VSN
+# from Restore import Restormer_default
+# from Utentive import Utentive_default
+# from HalfRestore import HalfRestomer_defalt
+from Biformer.Biformer import biformer_base
 archs = {
             'RMT_T': RMT_T3,
             'RMT_S': RMT_S,
             'RMT_B': RMT_M2,
-            'RMT_L': RMT_L6
+            'RMT_L': RMT_L6,
+            'VSN' : VSN,
+            "Biformer" : biformer_base
+            # 'Restormer' : Restormer_default,
+            # 'Utentive' : Utentive_default,
+            # 'Half' : HalfRestomer_defalt
          }
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
@@ -72,7 +81,7 @@ def get_args_parser():
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                         help='SGD momentum (default: 0.9)')
     parser.add_argument('--weight-decay', type=float, default=0.05,
-                        help='weight decay (default: 0.05)')
+                        help='weight decay (default: 0.05)')  
     # Learning rate schedule parameters
     parser.add_argument('--sched', default='cosine', type=str, metavar='SCHEDULER',
                         help='LR scheduler (default: "cosine"')
@@ -148,6 +157,8 @@ def get_args_parser():
 
     # * Finetuning params
     parser.add_argument('--finetune', default='', help='finetune from checkpoint')
+    parser.add_argument('--loadfrom', default='', help='load from checkpoint')
+    parser.add_argument('--hook', default='', help='hook you')
 
     # Dataset parameters
     parser.add_argument('--data-path', default='/datasets01/imagenet_full_size/061417/', type=str,
@@ -258,14 +269,33 @@ def main(args):
     model = archs[args.model](args)
     
     print(model)
-    model.eval()
-    flops = FlopCountAnalysis(model, torch.rand(1, 3, args.input_size, args.input_size))
-    print(flop_count_table(flops))
+    # model.eval()
+    # flops = FlopCountAnalysis(model, torch.rand(1, 3, args.input_size, args.input_size))
+    # print(flop_count_table(flops))
 
     if args.finetune:
         checkpoint = torch.load(args.finetune, map_location='cpu')
+
         model.load_state_dict(checkpoint['model'], strict=True)
 
+    if args.loadfrom:
+        print("load from",args.loadfrom)
+        checkpoint = torch.load(args.loadfrom,map_location='cpu')
+        missingkeys , unexpect = model.load_state_dict(checkpoint['model'],strict=False)
+        print("Missing keys:", missingkeys)  # 这些是 B 需要但 A 没有的参数
+        print("Unexpected keys:", unexpect)  # 这些是 A 里有但 B 不需要的参数
+
+    if args.hook:
+        def hook_fn(module, input, output):
+            # 注意：input 是一个元组，通常我们取第一个元素
+            input_data = input[0].detach().cpu().numpy()
+            output_data = output.detach().cpu().numpy()
+            
+            # 保存数据到文件，可以使用 np.save 或其他保存方式
+            np.save("l-1b-1input.npy", input_data)
+            np.save("l-1b-1output.npy", output_data)
+        hook_handle = model.layers[-2].blocks[-1].retention.rotateModule.register_forward_hook(hook_fn)
+        
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     model.to(device)
 

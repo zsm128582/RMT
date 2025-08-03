@@ -11,3 +11,4 @@ save
 *.out
 *.pth
 model_best.pth.tar
+*.npy
