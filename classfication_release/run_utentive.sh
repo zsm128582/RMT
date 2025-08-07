@@ -1,0 +1,1 @@
+torchrun --nproc_per_node=4  main.py --warmup-epochs 5 --model Utentive  --data-path /home/zengshimao/code/RMT/data --num_workers 32  --batch-size 96  --drop-path 0.05  --epoch 300 --dist-eval  --output_dir save 

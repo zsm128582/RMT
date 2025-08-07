@@ -1,0 +1,2 @@
+# bash tools/dist_train.sh configs/RMT/RMT_FPN_t_1x.py 2 --options model.pretrained=allrank_best_140e.pth
+torchrun --nproc_per_node=4  main.py --warmup-epochs 5 --model RMT_T  --data-path /home/zengshimao/datasets/ImageNet1k --num_workers 16  --batch-size 64  --drop-path 0.05  --epoch 300 --dist-eval  --output_dir all_rank
