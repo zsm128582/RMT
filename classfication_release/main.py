@@ -27,18 +27,20 @@ import utils
 import os
 
 from RMT import RMT_T3, RMT_S, RMT_M2, RMT_L6
-from vsa import VSN
+# from vsa import VSN
 # from Restore import Restormer_default
 # from Utentive import Utentive_default
 # from HalfRestore import HalfRestomer_defalt
-from Biformer.Biformer import biformer_base
+# from Biformer.Biformer import biformer_base
+from SegNet.segmentBackbone import VisSegNet_S
 archs = {
             'RMT_T': RMT_T3,
             'RMT_S': RMT_S,
             'RMT_B': RMT_M2,
             'RMT_L': RMT_L6,
-            'VSN' : VSN,
-            "Biformer" : biformer_base
+            # 'VSN' : VSN,
+            # "Biformer" : biformer_base,
+            'SegNet' : VisSegNet_S
             # 'Restormer' : Restormer_default,
             # 'Utentive' : Utentive_default,
             # 'Half' : HalfRestomer_defalt
@@ -311,7 +313,7 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
@@ -372,7 +374,7 @@ def main(args):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            checkpoint = torch.load(args.resume, map_location='cpu',weights_only=False)
         model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
         if args.model_ema:                
             model_ema.ema.load_state_dict(checkpoint['model_ema'], strict=True)
@@ -398,7 +400,7 @@ def main(args):
                 checkpoint = torch.hub.load_state_dict_from_url(
                     args.resume, map_location='cpu', check_hash=True)
             else:
-                checkpoint = torch.load(args.resume, map_location='cpu')
+                checkpoint = torch.load(args.resume, map_location='cpu' , weights_only=False)
             model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
             if args.model_ema:                
                 model_ema.ema.load_state_dict(checkpoint['model_ema'], strict=True)
@@ -420,7 +422,8 @@ def main(args):
             lr_scheduler, model, criterion, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             args.clip_grad, model_ema, mixup_fn,
-            set_training_mode=args.finetune==''  # keep in eval mode during finetuning
+            set_training_mode=args.finetune=='',  # keep in eval mode during finetuning
+            giveEpochAsArgs = args.model=='SegNet'
         )
 
         lr_scheduler.step(epoch)

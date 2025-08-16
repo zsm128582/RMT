@@ -1,0 +1,1 @@
+torchrun --nproc_per_node=1  main.py --warmup-epochs 5 --model SegNet  --data-path /home/zengshimao/datasets/ImageNet1k --num_workers 64  --batch-size 96  --drop-path 0.05  --epoch 300 --eval --resume /home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/firstTest/backup200.pth --output_dir /home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/firstTest

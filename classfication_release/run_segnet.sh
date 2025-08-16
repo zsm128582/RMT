@@ -1,0 +1,1 @@
+torchrun --nproc_per_node=3  main.py --warmup-epochs 5 --model SegNet  --data-path /home/zengshimao/datasets/ImageNet1k --num_workers 64  --batch-size 84  --drop-path 0.05  --epoch 300 --dist-eval  --output_dir /home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/gumbel-softmax

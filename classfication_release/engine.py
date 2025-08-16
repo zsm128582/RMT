@@ -20,7 +20,7 @@ def train_one_epoch(lr_scheduler, model: torch.nn.Module, criterion: Distillatio
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,                    
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,                    
-                    set_training_mode=True):
+                    set_training_mode=True , giveEpochAsArgs = False):
     model.train(set_training_mode)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -38,7 +38,10 @@ def train_one_epoch(lr_scheduler, model: torch.nn.Module, criterion: Distillatio
             samples, targets = mixup_fn(samples, targets)
 
         with torch.cuda.amp.autocast():
-            outputs = model(samples)
+            if giveEpochAsArgs :
+                outputs = model(samples , epoch)
+            else:
+                outputs = model(samples)
             loss = criterion(samples, outputs, targets)
 
         loss_value = loss.item()
@@ -84,7 +87,7 @@ def evaluate(data_loader, model, device):
         target = target.to(device, non_blocking=True)
 
         # compute output
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast():
             output = model(images)
             loss = criterion(output, target)
 
