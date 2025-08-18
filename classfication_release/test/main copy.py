@@ -195,6 +195,38 @@ def get_args_parser():
     return parser
 
 
+class DataPrefetcher():
+    def __init__(self, loader,device ):
+        self.loader = iter(loader)
+        self.stream = torch.cuda.Stream()
+        self.device = device
+        self.preload()
+
+    def preload(self):
+        try:
+            self.next_input, self.next_target= next(self.loader)
+        except StopIteration:
+            self.next_input = None
+            self.next_target = None
+            return
+        with torch.cuda.stream(self.stream):
+            self.next_input = self.next_input.to(device = self.device, non_blocking=True)
+            self.next_target = self.next_target.to(device = self.device, non_blocking=True)
+
+    def next(self):
+        torch.cuda.current_stream().wait_stream(self.stream)
+        input = self.next_input
+        target = self.next_target
+        if input is not None:
+            input.record_stream(torch.cuda.current_stream())
+        if target is not None:
+            target.record_stream(torch.cuda.current_stream())
+        self.preload()
+        return input, target
+    
+    def  __len__(self):
+        return len(self.loader)
+
 def main(args):
     utils.init_distributed_mode(args)
 
@@ -239,17 +271,18 @@ def main(args):
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-    
-    torch.backends.cudnn.benchmark = True
+
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=True,
-        persistent_workers=True,
-        prefetch_factor = 5
+        persistent_workers=True
     )
+
+    train_prefecther = DataPrefetcher(data_loader_train,device)
+    
 
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val, sampler=sampler_val,
@@ -421,7 +454,7 @@ def main(args):
             data_loader_train.sampler.set_epoch(epoch)
 
         train_stats = train_one_epoch(
-            lr_scheduler, model, criterion, data_loader_train,
+            lr_scheduler, model, criterion, train_prefecther,
             optimizer, device, epoch, loss_scaler,
             args.clip_grad, model_ema, mixup_fn,
             set_training_mode=args.finetune=='',  # keep in eval mode during finetuning
@@ -512,8 +545,6 @@ def main(args):
         test_f = {'test_{}'.format(k): v for k, v in test_stats.items()}
         if model_ema is not None:
             test_ema_f = {'test_ema_{}'.format(k): v for k, v in test_stats_ema.items()}
-        else:
-            test_ema_f = {}
         log_stats = dict({'epoch': epoch,
                           'n_parameters': n_parameters}, **train_f, **test_f, **test_ema_f)
 

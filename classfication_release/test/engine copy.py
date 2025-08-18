@@ -25,15 +25,15 @@ def train_one_epoch(lr_scheduler, model: torch.nn.Module, criterion: Distillatio
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 30
+    print_freq = 10
     
-    num_steps = len(data_loader)
-    idx = 0
-
-    for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
-        samples = samples.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
-
+    total = len(data_loader)
+    samples, targets = data_loader.next()
+    
+    i = 0
+    while samples is not None:
+        i += 1
+        
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
@@ -59,16 +59,48 @@ def train_one_epoch(lr_scheduler, model: torch.nn.Module, criterion: Distillatio
         torch.cuda.synchronize()
         if model_ema is not None:
             model_ema.update(model)
+    
+        samples, targets = data_loader.next()
+        print(f"{i}/{total}")
+    
+    return {}
+    # for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
+    #     samples = samples.to(device, non_blocking=True)
+    #     targets = targets.to(device, non_blocking=True)
 
-        metric_logger.update(loss=loss_value)
-        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-        # idx += 1
-        # if idx >= 5:
-        #     break
-    # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
-    print("Averaged stats:", metric_logger)
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    #     if mixup_fn is not None:
+    #         samples, targets = mixup_fn(samples, targets)
+
+    #     with torch.amp.autocast('cuda'):
+    #         if giveEpochAsArgs :
+    #             outputs = model(samples , epoch)
+    #         else:
+    #             outputs = model(samples)
+    #         loss = criterion(samples, outputs, targets)
+
+    #     loss_value = loss.item()
+
+    #     if not math.isfinite(loss_value):
+    #         print("Loss is {}, stopping training".format(loss_value))
+    #         sys.exit(1)
+
+    #     optimizer.zero_grad()
+
+    #     # this attribute is added by timm on one optimizer (adahessian)
+    #     is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
+    #     loss_scaler(loss, optimizer, clip_grad=max_norm,
+    #                 parameters=model.parameters(), create_graph=is_second_order)
+    #     torch.cuda.synchronize()
+    #     if model_ema is not None:
+    #         model_ema.update(model)
+
+    #     metric_logger.update(loss=loss_value)
+    #     metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+
+    # # gather the stats from all processes
+    # metric_logger.synchronize_between_processes()
+    # print("Averaged stats:", metric_logger)
+    # return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
 @torch.no_grad()
