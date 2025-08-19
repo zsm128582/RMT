@@ -606,14 +606,14 @@ class VisSegNet(nn.Module):
     def forward_features(self, x , epoch):
         b , c , h , w = x.shape
         num_q = 8
-        queries = torch.randn(b,num_q , self.embed_dim)
-        queries = queries / queries.norm(dim=-1, keepdim=True)
+        # queries = torch.randn(b,num_q , self.embed_dim)
+        # queries = queries / queries.norm(dim=-1, keepdim=True)
         
         #  b c , h ,w
         x = self.patch_embed(x)
         #FIXME : N , C -> B , N , C
         # queries = self.q.weight[None , :].expand(x.shape[0] , -1,-1)
-        queries = self.q.expand(b , -1,-1)
+        queries = self.q.repeat(b , 1,1)
         
         firstlayer = self.layers[0]
         
