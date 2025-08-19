@@ -513,7 +513,7 @@ class BasicLayer(nn.Module):
         return x , queries
 
 
-class VisSegNet(nn.Module):
+class VisSegNet_Ushape(nn.Module):
 
     def __init__(self, in_chans=3, num_classes=1000,
                  embed_dims=[96, 192, 384, 768], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
@@ -606,14 +606,14 @@ class VisSegNet(nn.Module):
     def forward_features(self, x , epoch):
         b , c , h , w = x.shape
         num_q = 8
-        # queries = torch.randn(b,num_q , self.embed_dim)
-        # queries = queries / queries.norm(dim=-1, keepdim=True)
+        queries = torch.randn(b,num_q , self.embed_dim)
+        queries = queries / queries.norm(dim=-1, keepdim=True)
         
         #  b c , h ,w
         x = self.patch_embed(x)
         #FIXME : N , C -> B , N , C
         # queries = self.q.weight[None , :].expand(x.shape[0] , -1,-1)
-        queries = self.q.repeat(b , 1,1)
+        queries = self.q.expand(b , -1,-1)
         
         firstlayer = self.layers[0]
         
@@ -632,7 +632,7 @@ class VisSegNet(nn.Module):
         x = torch.flatten(x, 1)
         return x
 
-    def forward(self, x ,epoch=200):
+    def forward(self, x ,epoch):
         x = self.forward_features(x , epoch)
         x = self.head(x)
         return x
@@ -640,8 +640,8 @@ class VisSegNet(nn.Module):
 
 
 @register_model
-def VisSegNet_S(args):
-    model = VisSegNet(
+def VisSegNet_Ushape_S(args):
+    model = VisSegNet_Ushape(
         embed_dims=[64, 128, 256, 512],
         depths=[3, 4, 18, 4],
         num_heads=[4, 4, 8, 16],

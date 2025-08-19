@@ -227,7 +227,8 @@ class VisionRetentionChunk(nn.Module):
         v = v.permute(0, 3, 2, 1, 4) #(b w n h d2)
 
         qk_mat_h = qr_h @ kr_h.transpose(-1, -2) #(b w n h h)
-        qk_mat_h =   + mask_h  #(b w n h h)
+        #FIXME：
+        qk_mat_h =  ?? + mask_h  #(b w n h h)
         qk_mat_h = torch.softmax(qk_mat_h, -1) #(b w n h h)
         output = torch.matmul(qk_mat_h, v) #(b w n h d2)
         
