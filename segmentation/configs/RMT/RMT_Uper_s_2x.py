@@ -64,7 +64,7 @@ lr_config = dict(
 data = dict(samples_per_gpu=2, workers_per_gpu=2)
 #############################################################################
 # runner = dict(max_iters=160000//(gpu_multipliers//2), work_dir='path\/RMT_Uper_s_1x')
-runner = dict(max_iters=160000 // (gpu_multipliers), work_dir="path/RMT_Uper_s_2x")
+runner = dict(max_iters=160000 // (gpu_multipliers), work_dir="work_dirs/RMT_Uper_s_2x")
 checkpoint_config = dict(max_keep_ckpts=1, interval=8000 // (gpu_multipliers))
 evaluation = dict(interval=8000 // (gpu_multipliers), save_best="mIoU")
 
