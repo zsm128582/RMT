@@ -612,7 +612,7 @@ class VisSegNet(nn.Module):
         x = self.patch_embed(x)
         #FIXME : N , C -> B , N , C
         # queries = self.q.weight[None , :].expand(x.shape[0] , -1,-1)
-        queries = self.q.repeat(b , 1,1)
+        queries = self.q.expand(b , -1, -1)
         
         firstlayer = self.layers[0]
         
