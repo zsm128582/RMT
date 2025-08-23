@@ -18,19 +18,16 @@ from typing import Tuple, Union
 from functools import partial
 from einops import einsum
 from .modules import PatchEmbed , PatchMerging , DWConv2d , FeedForwardNetwork,RetNetRelPos2d,MemoryEfficientSwish,theta_shift,RotateModule
-
+import os
 
 class MaskScheduler:
-    """
-    动态调度 soft mask / gumbel-softmax / argmax 的分区mask
-    """
     def __init__(self, 
                  max_epoch: int,
                  tau_start: float = 2.0,
                  tau_end: float = 0.1,
-                 soft_phase: float = 0.3,   # 前30% epoch
-                 gumbel_phase: float = 0.6, # 接下来的40%
-                 hard_phase: float = 0.1):  # 再接下来的10%，最后是argmax
+                 soft_phase: float = 0.3,
+                 gumbel_phase: float = 0.6,
+                 hard_phase: float = 0.1):
         self.max_epoch = max_epoch
         self.tau_start = tau_start
         self.tau_end = tau_end
@@ -39,16 +36,13 @@ class MaskScheduler:
         self.hard_phase = hard_phase
 
     def get_tau(self, epoch: int):
-        """指数衰减温度"""
         ratio = epoch / self.max_epoch
-        tau = self.tau_start * (self.tau_end / self.tau_start) ** ratio
-        return tau
+        return self.tau_start * (self.tau_end / self.tau_start) ** ratio
 
     def __call__(self, logits: torch.Tensor, epoch: int):
         """
         logits: [B, N, num_q]
-        epoch: 当前训练的epoch
-        return: mask [B, N, N] (float类型，1允许，0禁止)
+        return: mask, is_soft
         """
         tau = self.get_tau(epoch)
         B, N, num_q = logits.shape
@@ -56,28 +50,32 @@ class MaskScheduler:
         phase1 = int(self.soft_phase * self.max_epoch)
         phase2 = phase1 + int(self.gumbel_phase * self.max_epoch)
         phase3 = phase2 + int(self.hard_phase * self.max_epoch)
-        #FIXME： 这种消耗显存实在是太多了！！！！！
+        
+        # region_id = logits.argmax(dim=-1)
+        # mask = (region_id.unsqueeze(-1) == region_id.unsqueeze(-2)).float()
+        # # print(f"mask shape is {mask.shape}")
+        # return mask , False
+    
         if epoch < phase1:
-            # soft mask
-            p = F.softmax(logits / tau, dim=-1)       # [B, N, num_q]
-            mask = torch.einsum("bik,bjk->bij", p, p) # 内积
+            p = F.softmax(logits / tau, dim=-1)
+            # p : N q. : N 属于 q 的概率   ： (N q * q N )
+            mask = torch.einsum("bik,bjk->bij", p, p)  
+            return mask, True  # soft
 
         elif epoch < phase2:
-            # gumbel-softmax soft
             p = F.gumbel_softmax(logits, tau=tau, hard=False, dim=-1)
             mask = torch.einsum("bik,bjk->bij", p, p)
+            return mask, True  # soft
 
         elif epoch < phase3:
-            # gumbel-softmax hard (前向one-hot，反向可微)
             p = F.gumbel_softmax(logits, tau=tau, hard=True, dim=-1)
             mask = torch.einsum("bik,bjk->bij", p, p)
+            return mask, False  # hard
 
         else:
-            # 最终 argmax
-            region_id = logits.argmax(dim=-1) # [B, N]
+            region_id = logits.argmax(dim=-1)
             mask = (region_id.unsqueeze(-1) == region_id.unsqueeze(-2)).float()
-
-        return mask
+            return mask, False  # hard
 
 # 现在打算的是 Q到像素 ， 像素到query ， query 到query 都是互相通的
 class MaskAttention(nn.Module):
@@ -104,7 +102,7 @@ class MaskAttention(nn.Module):
         nn.init.xavier_normal_(self.out_proj.weight)
         nn.init.constant_(self.out_proj.bias, 0.0)
 
-    def forward(self, x: torch.Tensor , mask , h , w):
+    def forward(self, x: torch.Tensor , mask , h , w  , isSoftMask = True):
         '''
         x: (b, n+h*w , c)
         '''
@@ -127,9 +125,15 @@ class MaskAttention(nn.Module):
         qk_mat = q_h @ k_h.transpose(-1, -2) #(b n l l)
         
         if mask is not None:
-            # FIXME : 确认是对应元素相乘
-            mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # 形状变为 [b, h, n, n]
-            qk_mat = qk_mat * mask  #(b n l l)
+            if isSoftMask:
+                # # 对应元素相乘
+                # mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # 形状变为 [b, h, n, n]
+                # qk_mat = qk_mat * mask  #(b n l l)
+                #对于soft mask来说，相乘太容易溢出了，而且原本的soft mask其实比较类似于一个相融的特征，而且mask为0时，log会很小，所以对应的qk_mat也会变小，其实更合理一些
+                
+                qk_mat = qk_mat + torch.log(mask.unsqueeze(1) + 1e-6)
+            else :
+                qk_mat = qk_mat.masked_fill(mask.unsqueeze(1) == 0, float("-inf"))
         
         qk_mat = torch.softmax(qk_mat, -1) #(b n l l)
         output = torch.matmul(qk_mat, v_h) #(b n l d2)
@@ -368,23 +372,17 @@ class SegBlock(nn.Module):
         ):
         b , h , w, c = x.shape
         _,num_q ,_ = queries.shape
-        
         x = x + self.pos(x)
         # b , N , c
         x = x.reshape(b,-1,c)
         x_with_q = torch.cat((queries , x) , dim=1)
-        # now generate mask
-
         
         #FIXME: 使用了full 
-        mask_logits =  x @ queries.transpose(-1, -2) # b , N ,numq
-        
-        # region_id = mask_logits.argmax(dim=-1)
+        mask_logits =  F.normalize(x) @ F.normalize(queries.transpose(-1, -2)) # b , N ,numq
         mask = torch.ones(b,num_q+h*w , num_q+h*w,dtype=x_with_q.dtype,device=x_with_q.device)
-        # B, N , N 
-
-        # mask[:,num_q:,num_q:] = region_id.unsqueeze(-1) == region_id.unsqueeze(-2) 
-        mask[:,num_q:,num_q:]  = self.mask_scheduler(mask_logits, epoch)
+        imgMask , isSoft  = self.mask_scheduler(mask_logits, epoch)
+        mask[:,num_q:,num_q:] = imgMask
+        
         
         
         # #FIXME: 
@@ -394,15 +392,16 @@ class SegBlock(nn.Module):
         # mask[:,num_q:,num_q:] = region_id.unsqueeze(-1) == region_id.unsqueeze(-2)
         
         if self.layerscale:
-            x_with_q = x_with_q + self.drop_path(self.gamma_1 * self.mask_attention(self.retention_layer_norm(x_with_q), mask , h ,w))
+            x_with_q = x_with_q + self.drop_path(self.gamma_1 * self.mask_attention(self.retention_layer_norm(x_with_q), mask , h ,w , isSoft))
             x_with_q = x_with_q + self.drop_path(self.gamma_2 * self.ffn(self.final_layer_norm(x_with_q)))
         else:
-            x_with_q = x_with_q + self.drop_path(self.mask_attention(self.retention_layer_norm(x_with_q) , mask , h , w))
+            x_with_q = x_with_q + self.drop_path(self.mask_attention(self.retention_layer_norm(x_with_q) , mask , h , w , isSoft))
             x_with_q = x_with_q + self.drop_path(self.ffn(self.final_layer_norm(x_with_q)))
 
         x = x_with_q[:,num_q:,:].reshape(b,h,w,c)
         queries = x_with_q[:,:num_q,:]
         return x , queries 
+    
 class SegLayer(nn.Module):
     def __init__(self, embed_dim, out_dim, depth, num_heads,
                  ffn_dim=96., drop_path=0., norm_layer=nn.LayerNorm, 
@@ -433,7 +432,7 @@ class SegLayer(nn.Module):
         b,n,d = queries.size()
     
         
-        for blk in self.blocks:
+        for index , blk in enumerate(self.blocks):
             x  , queries= blk(x , queries , epoch)
                 
         if self.downsample is not None:
@@ -606,8 +605,8 @@ class VisSegNet(nn.Module):
     def forward_features(self, x , epoch):
         b , c , h , w = x.shape
         num_q = 8
-        queries = torch.randn(b,num_q , self.embed_dim)
-        queries = queries / queries.norm(dim=-1, keepdim=True)
+        # queries = torch.randn(b,num_q , self.embed_dim)
+        # queries = queries / queries.norm(dim=-1, keepdim=True)
         
         #  b c , h ,w
         x = self.patch_embed(x)
