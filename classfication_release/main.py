@@ -33,6 +33,7 @@ from RMT import RMT_T3, RMT_S, RMT_M2, RMT_L6
 # from HalfRestore import HalfRestomer_defalt
 # from Biformer.Biformer import biformer_base
 from SegNet.segmentBackbone import VisSegNet_S
+from SegNet_conv.segmentBackbone import VisSegNet_conv_T
 archs = {
             'RMT_T': RMT_T3,
             'RMT_S': RMT_S,
@@ -40,7 +41,8 @@ archs = {
             'RMT_L': RMT_L6,
             # 'VSN' : VSN,
             # "Biformer" : biformer_base,
-            'SegNet' : VisSegNet_S
+            'SegNet' : VisSegNet_S,
+            'VisSegNet_conv_T' : VisSegNet_conv_T
             # 'Restormer' : Restormer_default,
             # 'Utentive' : Utentive_default,
             # 'Half' : HalfRestomer_defalt
