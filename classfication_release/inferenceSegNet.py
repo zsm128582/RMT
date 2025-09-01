@@ -220,7 +220,8 @@ if __name__ == '__main__':
 """"
 可视化方法：
 import matplotlib.pyplot as plt
-region_map = region_id.reshape(7,7)
+region_id = mask_logits.argmax(dim=-1)
+region_map = region_id.reshape(28,28)
 cmap = plt.cm.get_cmap('tab10', 8)
 plt.imshow(region_map, cmap=cmap)
 plt.savefig("/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/inference/7*7mask.png")

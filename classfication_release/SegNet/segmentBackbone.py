@@ -377,8 +377,11 @@ class SegBlock(nn.Module):
         x = x.reshape(b,-1,c)
         x_with_q = torch.cat((queries , x) , dim=1)
         
-        #FIXME: 使用了full 
+        #FIXME : 完了，F.normalize的默认归一化维度是1，所以现在感觉很奇怪,
         mask_logits =  F.normalize(x) @ F.normalize(queries.transpose(-1, -2)) # b , N ,numq
+        # mask_logits =  F.normalize(x , dim = -1) @ F.normalize(queries , dim=-1).transpose(-1,-2) # b , N ,numq
+        # mask_logits =  x @ queries.transpose(-1,-2) # b , N ,numq
+        
         mask = torch.ones(b,num_q+h*w , num_q+h*w,dtype=x_with_q.dtype,device=x_with_q.device)
         imgMask , isSoft  = self.mask_scheduler(mask_logits, epoch)
         mask[:,num_q:,num_q:] = imgMask
