@@ -15,9 +15,10 @@ from .FAT import FAT
 from .RMT import RMT
 from .RMT_Swin import RMT_Swin
 from .TNT.TNT import TNT
+from .SegNet.segmentBackbone import VisSegNet
 
 __all__ = [
     'ResNet', 'ResNetV1c', 'ResNetV1d', 'ResNeXt', 'HRNet', 'FastSCNN',
     'ResNeSt', 'MobileNetV2', 'UNet', 'CGNet', 'MobileNetV3',
-    'VisionTransformer', 'EfficientViT', 'FAT', 'RMT', 'RMT_Swin','TNT'
+    'VisionTransformer', 'EfficientViT', 'FAT', 'RMT', 'RMT_Swin','TNT','VisSegNet'
 ]

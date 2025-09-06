@@ -110,15 +110,8 @@ tok2class[:, Nq:] = classes.to(torch.int32)
 # 注意：mask_mod 的参数是标量索引（b,h,q_idx,kv_idx），需在闭包中读取 tok2class/Nq
 def mask_mod(b, h, q_idx, kv_idx):
     # 任何人都能看全局 keys
-    is_kv_global = kv_idx < Nq
-    if is_kv_global:
-        return True
-    # 全局 queries 能看任何 keys
-    is_q_global = q_idx < Nq
-    if is_q_global:
-        return True
-    # 其余情况：类内相等
-    return tok2class[b, q_idx] == tok2class[b, kv_idx]
+    return  (kv_idx < Nq) | (q_idx < Nq) |   tok2class[b, q_idx] == tok2class[b, kv_idx]
+
 
 # 可选：也可以用 score_mod 做硬 mask（把不允许的分数置 -inf）：
 def score_mod(score, b, h, q_idx, kv_idx):
@@ -161,9 +154,10 @@ tok2class2 = torch.full((B, Nq + L), -1, device=device, dtype=torch.int32)
 tok2class2[:, Nq:] = torch.gather(classes, 1, idx_sorted).to(torch.int32)
 
 def mask_mod2(b, h, q_idx, kv_idx):
-    if (kv_idx < Nq) or (q_idx < Nq):
-        return True
-    return tok2class2[b, q_idx] == tok2class2[b, kv_idx]
+    # return torch.where()
+    return (kv_idx < Nq) | (q_idx < Nq) |   tok2class2[b, q_idx] == tok2class2[b, kv_idx]
+    # return q_idx >= kv_idx
+
 
 block_mask2 = create_block_mask(mask_mod2, B=B, H=H, Q_LEN=T, KV_LEN=T, device=device, BLOCK_SIZE=128,_compile = True)
 

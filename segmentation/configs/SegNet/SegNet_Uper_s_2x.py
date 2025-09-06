@@ -1,5 +1,5 @@
 _base_ = [
-    "../_base_/models/RMT_upper.py",
+    "../_base_/models/SegNet_upper.py",
     "../_base_/datasets/ade20k_uper.py",
     "../_base_/default_runtime.py",
     "../_base_/schedules/schedule_160k.py",
@@ -64,13 +64,13 @@ lr_config = dict(
 data = dict(samples_per_gpu=2, workers_per_gpu=2)
 #############################################################################
 # runner = dict(max_iters=160000//(gpu_multipliers//2), work_dir='path\/RMT_Uper_s_1x')
-runner = dict(max_iters=160000 // (gpu_multipliers), work_dir="work_dirs/RMT_Uper_s_2x")
+runner = dict(max_iters=160000 // (gpu_multipliers), work_dir="work_dirs/SegNet_Uper_s_2x")
 checkpoint_config = dict(max_keep_ckpts=1, interval=8000 // (gpu_multipliers))
 evaluation = dict(interval=8000 // (gpu_multipliers), save_best="mIoU")
 
 # NOTE: True is conflict with checkpoint
 # https://github.com/allenai/longformer/issues/63#issuecomment-648861503
-find_unused_parameters = False
+find_unused_parameters = True
 
 # place holder for new verison mmseg compatiability
 resume_from = None

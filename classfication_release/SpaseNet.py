@@ -678,7 +678,7 @@ class VisionSparseAttention(nn.Module):
 
         # ========= 融合三分支 =========
         # 这里简单采用平均融合，也可以设计 learnable 的融合权重
-        out_total = (out_comp  + out_local )/ 2# [B, heads, N, self.dim_head]
+        out_total = (out_comp + out_fine  + out_local )/ 3# [B, heads, N, self.dim_head]
         # 合并多头，恢复为 [B, N, total_dim]
         out_total = out_total.transpose(1, 2).reshape(B, H * W, self.total_dim)
         # out_total = self.out_proj(out_total)  # [B, N, in_channels]

@@ -33,6 +33,7 @@ from RMT import RMT_T3, RMT_S, RMT_M2, RMT_L6
 # from HalfRestore import HalfRestomer_defalt
 # from Biformer.Biformer import biformer_base
 from SegNet.segmentBackbone import VisSegNet_S
+from SegNet_conv.segmentBackbone import VisSegNet_conv_T
 archs = {
             'RMT_T': RMT_T3,
             'RMT_S': RMT_S,
@@ -40,7 +41,8 @@ archs = {
             'RMT_L': RMT_L6,
             # 'VSN' : VSN,
             # "Biformer" : biformer_base,
-            'SegNet' : VisSegNet_S
+            'SegNet' : VisSegNet_S,
+            'VisSegNet_conv_T' : VisSegNet_conv_T
             # 'Restormer' : Restormer_default,
             # 'Utentive' : Utentive_default,
             # 'Half' : HalfRestomer_defalt
@@ -479,6 +481,7 @@ def main(args):
 
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+        test_stats_ema = None
         if model_ema is not None:
             test_stats_ema = evaluate(data_loader_val, model_ema.ema, device)
             print(f"Accuracy of the network_ema on the {len(dataset_val)} test images: {test_stats_ema['acc1']:.1f}%")
@@ -486,7 +489,7 @@ def main(args):
         if model_ema is not None:
             max_accuracy = max(max_accuracy, test_stats_ema['acc1'])
         print('Max accuracy: {:.2f}%'.format(max_accuracy))
-        if (max_accuracy == test_stats["acc1"]) or (max_accuracy == test_stats_ema['acc1']):
+        if (max_accuracy == test_stats["acc1"]) or ((test_stats_ema is not None) and (max_accuracy == test_stats_ema['acc1'])):
             if args.model_ema:
                     utils.save_on_master({
                         'model': model_without_ddp.state_dict(),

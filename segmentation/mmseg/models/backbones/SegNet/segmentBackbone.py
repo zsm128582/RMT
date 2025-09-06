@@ -18,16 +18,24 @@ from typing import Tuple, Union
 from functools import partial
 from einops import einsum
 from .modules import PatchEmbed , PatchMerging , DWConv2d , FeedForwardNetwork,RetNetRelPos2d,MemoryEfficientSwish,theta_shift,RotateModule
-import os
+
+#for segmentation
+from ...builder import BACKBONES
+from mmcv_custom import load_checkpoint
+from mmseg.utils import get_root_logger
+
 
 class MaskScheduler:
+    """
+    动态调度 soft mask / gumbel-softmax / argmax 的分区mask
+    """
     def __init__(self, 
                  max_epoch: int,
                  tau_start: float = 2.0,
                  tau_end: float = 0.1,
-                 soft_phase: float = 0.3,
-                 gumbel_phase: float = 0.6,
-                 hard_phase: float = 0.1):
+                 soft_phase: float = 0.3,   # 前30% epoch
+                 gumbel_phase: float = 0.6, # 接下来的40%
+                 hard_phase: float = 0.1):  # 再接下来的10%，最后是argmax
         self.max_epoch = max_epoch
         self.tau_start = tau_start
         self.tau_end = tau_end
@@ -36,13 +44,16 @@ class MaskScheduler:
         self.hard_phase = hard_phase
 
     def get_tau(self, epoch: int):
+        """指数衰减温度"""
         ratio = epoch / self.max_epoch
-        return self.tau_start * (self.tau_end / self.tau_start) ** ratio
+        tau = self.tau_start * (self.tau_end / self.tau_start) ** ratio
+        return tau
 
     def __call__(self, logits: torch.Tensor, epoch: int):
         """
         logits: [B, N, num_q]
-        return: mask, is_soft
+        epoch: 当前训练的epoch
+        return: mask [B, N, N] (float类型，1允许，0禁止)
         """
         tau = self.get_tau(epoch)
         B, N, num_q = logits.shape
@@ -50,32 +61,28 @@ class MaskScheduler:
         phase1 = int(self.soft_phase * self.max_epoch)
         phase2 = phase1 + int(self.gumbel_phase * self.max_epoch)
         phase3 = phase2 + int(self.hard_phase * self.max_epoch)
-        
-        # region_id = logits.argmax(dim=-1)
-        # mask = (region_id.unsqueeze(-1) == region_id.unsqueeze(-2)).float()
-        # # print(f"mask shape is {mask.shape}")
-        # return mask , False
-    
+        #FIXME： 这种消耗显存实在是太多了！！！！！
         if epoch < phase1:
-            p = F.softmax(logits / tau, dim=-1)
-            # p : N q. : N 属于 q 的概率   ： (N q * q N )
-            mask = torch.einsum("bik,bjk->bij", p, p)  
-            return mask, True  # soft
+            # soft mask
+            p = F.softmax(logits / tau, dim=-1)       # [B, N, num_q]
+            mask = torch.einsum("bik,bjk->bij", p, p) # 内积
 
         elif epoch < phase2:
+            # gumbel-softmax soft
             p = F.gumbel_softmax(logits, tau=tau, hard=False, dim=-1)
             mask = torch.einsum("bik,bjk->bij", p, p)
-            return mask, True  # soft
 
         elif epoch < phase3:
+            # gumbel-softmax hard (前向one-hot，反向可微)
             p = F.gumbel_softmax(logits, tau=tau, hard=True, dim=-1)
             mask = torch.einsum("bik,bjk->bij", p, p)
-            return mask, False  # hard
 
         else:
-            region_id = logits.argmax(dim=-1)
+            # 最终 argmax
+            region_id = logits.argmax(dim=-1) # [B, N]
             mask = (region_id.unsqueeze(-1) == region_id.unsqueeze(-2)).float()
-            return mask, False  # hard
+
+        return mask
 
 # 现在打算的是 Q到像素 ， 像素到query ， query 到query 都是互相通的
 class MaskAttention(nn.Module):
@@ -102,7 +109,7 @@ class MaskAttention(nn.Module):
         nn.init.xavier_normal_(self.out_proj.weight)
         nn.init.constant_(self.out_proj.bias, 0.0)
 
-    def forward(self, x: torch.Tensor , mask , h , w  , isSoftMask = True):
+    def forward(self, x: torch.Tensor , mask , h , w):
         '''
         x: (b, n+h*w , c)
         '''
@@ -125,15 +132,9 @@ class MaskAttention(nn.Module):
         qk_mat = q_h @ k_h.transpose(-1, -2) #(b n l l)
         
         if mask is not None:
-            if isSoftMask:
-                # # 对应元素相乘
-                # mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # 形状变为 [b, h, n, n]
-                # qk_mat = qk_mat * mask  #(b n l l)
-                #对于soft mask来说，相乘太容易溢出了，而且原本的soft mask其实比较类似于一个相融的特征，而且mask为0时，log会很小，所以对应的qk_mat也会变小，其实更合理一些
-                
-                qk_mat = qk_mat + torch.log(mask.unsqueeze(1) + 1e-6)
-            else :
-                qk_mat = qk_mat.masked_fill(mask.unsqueeze(1) == 0, float("-inf"))
+            # FIXME : 确认是对应元素相乘
+            mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # 形状变为 [b, h, n, n]
+            qk_mat = qk_mat * mask  #(b n l l)
         
         qk_mat = torch.softmax(qk_mat, -1) #(b n l l)
         output = torch.matmul(qk_mat, v_h) #(b n l d2)
@@ -359,7 +360,6 @@ class SegBlock(nn.Module):
         self.pos = DWConv2d(embed_dim, 3, 1, 1)
         #FIXME:
         self.mask_scheduler = MaskScheduler(max_epoch=200)
-        self.logit_temperature = nn.Parameter(torch.tensor(math.sqrt(embed_dim), dtype=torch.float32))
         if layerscale:
             self.gamma_1 = nn.Parameter(layer_init_values * torch.ones(1, 1, 1, embed_dim),requires_grad=True)
             self.gamma_2 = nn.Parameter(layer_init_values * torch.ones(1, 1, 1, embed_dim),requires_grad=True)
@@ -373,22 +373,23 @@ class SegBlock(nn.Module):
         ):
         b , h , w, c = x.shape
         _,num_q ,_ = queries.shape
+        
         x = x + self.pos(x)
         # b , N , c
         x = x.reshape(b,-1,c)
         x_with_q = torch.cat((queries , x) , dim=1)
+        # now generate mask
+
         
-        #FIXME : 完了，F.normalize的默认归一化维度是1，所以现在感觉很奇怪,
-        # mask_logits =  F.normalize(x) @ F.normalize(queries.transpose(-1, -2)) # b , N ,numq
-        mask_logits = F.normalize(x , dim=-1) @ F.normalize(queries,dim=-1).transpose(-1, -2)
-        mask_logits = mask_logits * self.logit_temperature.float()
-        # mask_logits =  F.normalize(x , dim = -1) @ F.normalize(queries , dim=-1).transpose(-1,-2) # b , N ,numq
-        # mask_logits =  x @ queries.transpose(-1,-2) # b , N ,numq
+        #FIXME: 使用了full 
+        mask_logits =  x @ queries.transpose(-1, -2) # b , N ,numq
         
+        # region_id = mask_logits.argmax(dim=-1)
         mask = torch.ones(b,num_q+h*w , num_q+h*w,dtype=x_with_q.dtype,device=x_with_q.device)
-        imgMask , isSoft  = self.mask_scheduler(mask_logits, epoch)
-        mask[:,num_q:,num_q:] = imgMask
-        
+        # B, N , N 
+
+        # mask[:,num_q:,num_q:] = region_id.unsqueeze(-1) == region_id.unsqueeze(-2) 
+        mask[:,num_q:,num_q:]  = self.mask_scheduler(mask_logits, epoch)
         
         
         # #FIXME: 
@@ -398,16 +399,15 @@ class SegBlock(nn.Module):
         # mask[:,num_q:,num_q:] = region_id.unsqueeze(-1) == region_id.unsqueeze(-2)
         
         if self.layerscale:
-            x_with_q = x_with_q + self.drop_path(self.gamma_1 * self.mask_attention(self.retention_layer_norm(x_with_q), mask , h ,w , isSoft))
+            x_with_q = x_with_q + self.drop_path(self.gamma_1 * self.mask_attention(self.retention_layer_norm(x_with_q), mask , h ,w))
             x_with_q = x_with_q + self.drop_path(self.gamma_2 * self.ffn(self.final_layer_norm(x_with_q)))
         else:
-            x_with_q = x_with_q + self.drop_path(self.mask_attention(self.retention_layer_norm(x_with_q) , mask , h , w , isSoft))
+            x_with_q = x_with_q + self.drop_path(self.mask_attention(self.retention_layer_norm(x_with_q) , mask , h , w))
             x_with_q = x_with_q + self.drop_path(self.ffn(self.final_layer_norm(x_with_q)))
 
         x = x_with_q[:,num_q:,:].reshape(b,h,w,c)
         queries = x_with_q[:,:num_q,:]
         return x , queries 
-    
 class SegLayer(nn.Module):
     def __init__(self, embed_dim, out_dim, depth, num_heads,
                  ffn_dim=96., drop_path=0., norm_layer=nn.LayerNorm, 
@@ -438,13 +438,16 @@ class SegLayer(nn.Module):
         b,n,d = queries.size()
     
         
-        for index , blk in enumerate(self.blocks):
+        for blk in self.blocks:
             x  , queries= blk(x , queries , epoch)
-                
+          
+        # seg：   
         if self.downsample is not None:
-            x = self.downsample(x)
+            x_down = self.downsample(x)
             queries = self.queriesLinear(queries)
-        return x , queries
+            return x , x_down , queries
+        else:
+            return x , x , queries
     
 class BasicLayer(nn.Module):
     """ A basic Swin Transformer layer for one stage.
@@ -511,28 +514,35 @@ class BasicLayer(nn.Module):
             else:
                 x , queries= blk(x , queries, incremental_state=None, chunkwise_recurrent=self.chunkwise_recurrent, retention_rel_pos=rel_pos)
                 
+        #FIXME：原版应该也要提出来
+        queries = self.queriesLinear(queries)  
+        # seg：   
         if self.downsample is not None:
-            x = self.downsample(x)
-            queries = self.queriesLinear(queries)
-            
-        return x , queries
+            x_down = self.downsample(x)
+            return x , x_down , queries
+        else:
+            return x , x , queries
 
-
+@BACKBONES.register_module()
 class VisSegNet(nn.Module):
-
-    def __init__(self, in_chans=3, num_classes=1000,
+    #Seg: 添加out_indices，norm_eval
+    def __init__(self, in_chans=3, out_indices = (0,1,2,3),
                  embed_dims=[96, 192, 384, 768], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  init_values=[1, 1, 1, 1], heads_ranges=[3, 3, 3, 3], mlp_ratios=[3, 3, 3, 3], drop_path_rate=0.1, norm_layer=nn.LayerNorm, 
                  patch_norm=True, use_checkpoints=[False, False, False, False], chunkwise_recurrents=[True, True, False, False], projection=1024,
-                 layerscales=[False, False, False, False], layer_init_values=1e-6 ):
+                 layerscales=[False, False, False, False], layer_init_values=1e-6 ,norm_eval = True):
         super().__init__()
-
-        self.num_classes = num_classes
+        #Seg: 
+        # self.num_classes = num_classes
+        self.out_indeces = out_indices
+        self.norm_eval = norm_eval
+        
         self.num_layers = len(depths)
         self.embed_dim = embed_dims[0]
         self.patch_norm = patch_norm
         self.num_features = embed_dims[-1]
         self.mlp_ratios = mlp_ratios
+        
 
         # FIXME : numq = ？
         num_q = 8
@@ -579,15 +589,20 @@ class VisSegNet(nn.Module):
                     layer_init_values=layer_init_values
                 )
             self.layers.append(layer)
+        # Seg：分类任务相关的全部删掉
+        # self.proj = nn.Linear(self.num_features, projection)
+        # self.norm = nn.BatchNorm2d(projection)
+        # self.swish = MemoryEfficientSwish()
+        # self.avgpool = nn.AdaptiveAvgPool1d(1)
+        # self.head = nn.Linear(projection, num_classes) if num_classes > 0 else nn.Identity()
+
+        # Seg： 添加输出norm
+        self.extra_norms = nn.ModuleList()
+        for i in range (4):
+            self.extra_norms.append(nn.LayerNorm(embed_dims[i]))
             
-        self.proj = nn.Linear(self.num_features, projection)
-        self.norm = nn.BatchNorm2d(projection)
-        self.swish = MemoryEfficientSwish()
-        self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.head = nn.Linear(projection, num_classes) if num_classes > 0 else nn.Identity()
-
         self.apply(self._init_weights)
-
+        
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
@@ -599,6 +614,32 @@ class VisSegNet(nn.Module):
                 nn.init.constant_(m.weight, 1.0)
             except:
                 pass
+            
+    def init_weights(self, pretrained=None):
+        """Initialize the weights in backbone.
+
+        Args:
+            pretrained (str, optional): Path to pre-trained weights.
+                Defaults to None.
+        """
+
+        def _init_weights(m):
+            if isinstance(m, nn.Linear):
+                trunc_normal_(m.weight, std=.02)
+                if isinstance(m, nn.Linear) and m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+
+        if isinstance(pretrained, str):
+            self.apply(_init_weights)
+            logger = get_root_logger()
+            load_checkpoint(self, pretrained, strict=False, logger=logger)
+        elif pretrained is None:
+            self.apply(_init_weights)
+        else:
+            raise TypeError('pretrained must be a str or None')
 
     @torch.jit.ignore
     def no_weight_decay(self):
@@ -611,6 +652,7 @@ class VisSegNet(nn.Module):
     def forward_features(self, x , epoch):
         b , c , h , w = x.shape
         num_q = 8
+        #FIXME:原版也要删掉
         # queries = torch.randn(b,num_q , self.embed_dim)
         # queries = queries / queries.norm(dim=-1, keepdim=True)
         
@@ -618,60 +660,70 @@ class VisSegNet(nn.Module):
         x = self.patch_embed(x)
         #FIXME : N , C -> B , N , C
         # queries = self.q.weight[None , :].expand(x.shape[0] , -1,-1)
-        queries = self.q.expand(b , -1, -1)
+        #FIXME：改成repeat ！！！！ 但是这一次训练的时候就是使用expand ， 所以先不修改，下次一定要改回来！！！！
+        queries = self.q.expand(b , -1,-1)
         
         firstlayer = self.layers[0]
         
         # 在这个layer内部，每个block都会做一次corss attention
+        # Seg :x_cur 指的是当前尺度， x是下采样后的
+        outs = []
+        x_cur , x , queries = firstlayer(x ,queries)
 
-        x  , queries = firstlayer(x ,queries)
+        x_cur = self.extra_norms[0](x_cur)
         
-        for layer in self.layers[1:]:
-            x , queries = layer(x , queries , epoch)
+        x_cur = x_cur.permute(0,3,1,2).contiguous()
 
-        x = self.proj(x) #(b h w c)
-        x = self.norm(x.permute(0, 3, 1, 2)).flatten(2, 3) #(b c h*w)
-        x = self.swish(x)
+        outs.append(x_cur)
+        
 
-        x = self.avgpool(x)  # B C 1
-        x = torch.flatten(x, 1)
-        return x
+        for index ,layer in enumerate(self.layers[1:]):
+            x_cur , x , queries = layer(x , queries , epoch)
+            # print(x_cur.shape)
+            x_cur = self.extra_norms[index+1](x_cur)
+            x_cur = x_cur.permute(0,3,1,2).contiguous()
 
+            outs.append(x_cur)
+            
+        #Seg : 关于分类的删掉
+        # x = self.proj(x) #(b h w c)
+        # x = self.norm(x.permute(0, 3, 1, 2)).flatten(2, 3) #(b c h*w)
+        # x = self.swish(x)
+
+        # x = self.avgpool(x)  # B C 1
+        # x = torch.flatten(x, 1)
+        return tuple(outs)
+    
+    #FIXME : 微调的时候默认使用200？还是慢慢来？
+    # Seg : 只有forward_features
     def forward(self, x ,epoch=200):
-        x = self.forward_features(x , epoch)
-        x = self.head(x)
-        return x
+        result = self.forward_features(x , epoch)
+        return result
 
 
+    ##Seg :在微调的时候使用预训练的bn，会好一点
+    def train(self, mode=True):
+        """Convert the model into training mode while keep normalization layer
+        freezed."""
+        super().train(mode)
+        if mode and self.norm_eval:
+            for m in self.modules():
+                # trick: eval have effect on BatchNorm only
+                if isinstance(m, nn.BatchNorm2d):
+                    m.eval()
 
-@register_model
-def VisSegNet_S(args):
-    model = VisSegNet(
-        embed_dims=[64, 128, 256, 512],
-        depths=[3, 4, 18, 4],
-        num_heads=[4, 4, 8, 16],
-        init_values=[2, 2, 2, 2],
-        heads_ranges=[4, 4, 6, 6],
-        mlp_ratios=[4, 4, 3, 3],
-        drop_path_rate=0.15,
-        chunkwise_recurrents=[True, True, True, False],
-        layerscales=[False, False, False, False]
-    )
-    model.default_cfg = _cfg()
-    return model
-
-@register_model
-def VisSegNet_T(args):
-    model = VisSegNet(
-        embed_dims=[64, 128, 256, 512],
-        depths=[2, 2,8,2],
-        num_heads=[4, 4, 8, 16],
-        init_values=[2, 2, 2, 2],
-        heads_ranges=[4, 4, 6, 6],
-        mlp_ratios=[3, 3, 3, 3],
-        drop_path_rate=0.1,
-        chunkwise_recurrents=[True, True, True, False],
-        layerscales=[False, False, False, False]
-    )
-    model.default_cfg = _cfg()
-    return model
+# @register_model
+# def VisSegNet_S(args):
+#     model = VisSegNet(
+#         embed_dims=[64, 128, 256, 512],
+#         depths=[3, 4, 18, 4],
+#         num_heads=[4, 4, 8, 16],
+#         init_values=[2, 2, 2, 2],
+#         heads_ranges=[4, 4, 6, 6],
+#         mlp_ratios=[4, 4, 3, 3],
+#         drop_path_rate=0.15,
+#         chunkwise_recurrents=[True, True, True, False],
+#         layerscales=[False, False, False, False]
+#     )
+#     model.default_cfg = _cfg()
+#     return model

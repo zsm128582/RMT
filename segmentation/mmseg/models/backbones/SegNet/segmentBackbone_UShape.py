@@ -17,135 +17,128 @@ import time
 from typing import Tuple, Union
 from functools import partial
 from einops import einsum
-
-class SwishImplementation(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, i):
-        result = i * torch.sigmoid(i)
-        ctx.save_for_backward(i)
-        return result
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        i = ctx.saved_tensors[0]
-        sigmoid_i = torch.sigmoid(i)
-        return grad_output * (sigmoid_i * (1 + i * (1 - sigmoid_i)))
-
-class MemoryEfficientSwish(nn.Module):
-    def forward(self, x):
-        return SwishImplementation.apply(x)
+from .modules import PatchEmbed , PatchMerging , DWConv2d , FeedForwardNetwork,RetNetRelPos2d,MemoryEfficientSwish,theta_shift,RotateModule
 
 
-def rotate_every_two(x):
-    x1 = x[:, :, :, :, ::2]
-    x2 = x[:, :, :, :, 1::2]
-    x = torch.stack([-x2, x1], dim=-1)
-    return x.flatten(-2)
+class MaskScheduler:
+    """
+    动态调度 soft mask / gumbel-softmax / argmax 的分区mask
+    """
+    def __init__(self, 
+                 max_epoch: int,
+                 tau_start: float = 2.0,
+                 tau_end: float = 0.1,
+                 soft_phase: float = 0.3,   # 前30% epoch
+                 gumbel_phase: float = 0.6, # 接下来的40%
+                 hard_phase: float = 0.1):  # 再接下来的10%，最后是argmax
+        self.max_epoch = max_epoch
+        self.tau_start = tau_start
+        self.tau_end = tau_end
+        self.soft_phase = soft_phase
+        self.gumbel_phase = gumbel_phase
+        self.hard_phase = hard_phase
 
-def theta_shift(x, sin, cos):
-    return (x * cos) + (rotate_every_two(x) * sin)
+    def get_tau(self, epoch: int):
+        """指数衰减温度"""
+        ratio = epoch / self.max_epoch
+        tau = self.tau_start * (self.tau_end / self.tau_start) ** ratio
+        return tau
 
-class DWConv2d(nn.Module):
+    def __call__(self, logits: torch.Tensor, epoch: int):
+        """
+        logits: [B, N, num_q]
+        epoch: 当前训练的epoch
+        return: mask [B, N, N] (float类型，1允许，0禁止)
+        """
+        tau = self.get_tau(epoch)
+        B, N, num_q = logits.shape
 
-    def __init__(self, dim, kernel_size, stride, padding):
-        super().__init__()
-        self.conv = nn.Conv2d(dim, dim, kernel_size, stride, padding, groups=dim)
+        phase1 = int(self.soft_phase * self.max_epoch)
+        phase2 = phase1 + int(self.gumbel_phase * self.max_epoch)
+        phase3 = phase2 + int(self.hard_phase * self.max_epoch)
+        #FIXME： 这种消耗显存实在是太多了！！！！！
+        if epoch < phase1:
+            # soft mask
+            p = F.softmax(logits / tau, dim=-1)       # [B, N, num_q]
+            mask = torch.einsum("bik,bjk->bij", p, p) # 内积
 
-    def forward(self, x: torch.Tensor):
-        '''
-        x: (b h w c)
-        '''
-        x = x.permute(0, 3, 1, 2) #(b c h w)
-        x = self.conv(x) #(b c h w)
-        x = x.permute(0, 2, 3, 1) #(b h w c)
-        return x
-    
+        elif epoch < phase2:
+            # gumbel-softmax soft
+            p = F.gumbel_softmax(logits, tau=tau, hard=False, dim=-1)
+            mask = torch.einsum("bik,bjk->bij", p, p)
 
-class RetNetRelPos2d(nn.Module):
-
-    def __init__(self, embed_dim, num_heads, initial_value, heads_range):
-        '''
-        recurrent_chunk_size: (clh clw)
-        num_chunks: (nch ncw)
-        clh * clw == cl
-        nch * ncw == nc
-
-        default: clh==clw, clh != clw is not implemented
-        '''
-        super().__init__()
-        angle = 1.0 / (10000 ** torch.linspace(0, 1, embed_dim // num_heads // 2))
-        angle = angle.unsqueeze(-1).repeat(1, 2).flatten()
-        self.initial_value = initial_value
-        self.heads_range = heads_range
-        self.num_heads = num_heads
-        decay = torch.log(1 - 2 ** (-initial_value - heads_range * torch.arange(num_heads, dtype=torch.float) / num_heads))
-        self.register_buffer('angle', angle)
-        self.register_buffer('decay', decay)
-        
-    def generate_2d_decay(self, H: int, W: int):
-        '''
-        generate 2d decay mask, the result is (HW)*(HW)
-        '''
-        index_h = torch.arange(H).to(self.decay)
-        index_w = torch.arange(W).to(self.decay)
-        grid = torch.meshgrid([index_h, index_w])
-        grid = torch.stack(grid, dim=-1).reshape(H*W, 2) #(H*W 2)
-        mask = grid[:, None, :] - grid[None, :, :] #(H*W H*W 2)
-        mask = (mask.abs()).sum(dim=-1)
-        mask = mask * self.decay[:, None, None]  #(n H*W H*W)
-        return mask
-    
-    def generate_1d_decay(self, l: int):
-        '''
-        generate 1d decay mask, the result is l*l
-        '''
-        index = torch.arange(l).to(self.decay)
-        mask = index[:, None] - index[None, :] #(l l)
-        mask = mask.abs() #(l l)
-        mask = mask * self.decay[:, None, None]  #(n l l)
-        return mask
-    
-    def forward(self, slen: Tuple[int], activate_recurrent=False, chunkwise_recurrent=False):
-        '''
-        slen: (h, w)
-        h * w == l
-        recurrent is not implemented
-        '''
-        if activate_recurrent:
-            sin = torch.sin(self.angle * (slen[0]*slen[1] - 1))
-            cos = torch.cos(self.angle * (slen[0]*slen[1] - 1))
-            retention_rel_pos = ((sin, cos), self.decay.exp())
-
-        elif chunkwise_recurrent:
-            index = torch.arange(slen[0]*slen[1]).to(self.decay)
-            sin = torch.sin(index[:, None] * self.angle[None, :]) #(l d1)
-            sin = sin.reshape(slen[0], slen[1], -1) #(h w d1)
-            cos = torch.cos(index[:, None] * self.angle[None, :]) #(l d1)
-            cos = cos.reshape(slen[0], slen[1], -1) #(h w d1)
-
-            mask_h = self.generate_1d_decay(slen[0])
-            mask_w = self.generate_1d_decay(slen[1])
-
-            retention_rel_pos = ((sin, cos), (mask_h, mask_w))
+        elif epoch < phase3:
+            # gumbel-softmax hard (前向one-hot，反向可微)
+            p = F.gumbel_softmax(logits, tau=tau, hard=True, dim=-1)
+            mask = torch.einsum("bik,bjk->bij", p, p)
 
         else:
-            index = torch.arange(slen[0]*slen[1]).to(self.decay)
-            sin = torch.sin(index[:, None] * self.angle[None, :]) #(l d1)
-            sin = sin.reshape(slen[0], slen[1], -1) #(h w d1)
-            cos = torch.cos(index[:, None] * self.angle[None, :]) #(l d1)
-            cos = cos.reshape(slen[0], slen[1], -1) #(h w d1)
-            mask = self.generate_2d_decay(slen[0], slen[1]) #(n l l)
-            retention_rel_pos = ((sin, cos), mask)
+            # 最终 argmax
+            region_id = logits.argmax(dim=-1) # [B, N]
+            mask = (region_id.unsqueeze(-1) == region_id.unsqueeze(-2)).float()
 
-        return retention_rel_pos
+        return mask
 
-class RotateModule(nn.Module):
-    
-    def __init__(self):
-        super(RotateModule,self).__init__()
-    
-    def forward(self,q , sin , cos):
-        return theta_shift(q,sin,cos)
+# 现在打算的是 Q到像素 ， 像素到query ， query 到query 都是互相通的
+class MaskAttention(nn.Module):
+
+    def __init__(self, embed_dim, num_heads, value_factor=1):
+        super().__init__()
+        self.factor = value_factor
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = self.embed_dim * self.factor // num_heads
+        self.key_dim = self.embed_dim // num_heads
+        self.scaling = self.key_dim ** -0.5
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.v_proj = nn.Linear(embed_dim, embed_dim * self.factor, bias=True)
+        self.lepe = DWConv2d(embed_dim, 5, 1, 2)
+        self.out_proj = nn.Linear(embed_dim*self.factor, embed_dim, bias=True)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_normal_(self.q_proj.weight, gain=2 ** -2.5)
+        nn.init.xavier_normal_(self.k_proj.weight, gain=2 ** -2.5)
+        nn.init.xavier_normal_(self.v_proj.weight, gain=2 ** -2.5)
+        nn.init.xavier_normal_(self.out_proj.weight)
+        nn.init.constant_(self.out_proj.bias, 0.0)
+
+    def forward(self, x: torch.Tensor , mask , h , w):
+        '''
+        x: (b, n+h*w , c)
+        '''
+        #FIXME:
+        bsz, seq_len , _ = x.size()
+        queriesNum = 8
+        # 
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+        # b h w c
+        lepe = self.lepe(v[:,queriesNum :].reshape(bsz , h , w , -1)).reshape(bsz , h*w , -1)
+
+        k *= self.scaling
+
+        q_h = q.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
+        k_h = k.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
+        v_h = k.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
+        
+        qk_mat = q_h @ k_h.transpose(-1, -2) #(b n l l)
+        
+        if mask is not None:
+            # FIXME : 确认是对应元素相乘
+            mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # 形状变为 [b, h, n, n]
+            qk_mat = qk_mat * mask  #(b n l l)
+        
+        qk_mat = torch.softmax(qk_mat, -1) #(b n l l)
+        output = torch.matmul(qk_mat, v_h) #(b n l d2)
+        
+        output = output.transpose(1, 2).reshape(bsz , seq_len , -1)
+        
+        output[:,queriesNum: , :] += lepe
+        output = self.out_proj(output)
+        return output
 
 
 class VisionRetentionChunk(nn.Module):
@@ -227,7 +220,7 @@ class VisionRetentionChunk(nn.Module):
         v = v.permute(0, 3, 2, 1, 4) #(b w n h d2)
 
         qk_mat_h = qr_h @ kr_h.transpose(-1, -2) #(b w n h h)
-        qk_mat_h = qk_mat_h  + mask_h  #(b w n h h)
+        qk_mat_h =   + mask_h  #(b w n h h)
         qk_mat_h = torch.softmax(qk_mat_h, -1) #(b w n h h)
         output = torch.matmul(qk_mat_h, v) #(b w n h d2)
         
@@ -236,6 +229,8 @@ class VisionRetentionChunk(nn.Module):
         output = self.out_proj(output)
         return output
     
+# 前面那个尺度先用cross attention获得queries
+# 后面的呢？
 class VisionRetentionAll(nn.Module):
 
     def __init__(self, embed_dim, num_heads, value_factor=1):
@@ -278,6 +273,7 @@ class VisionRetentionAll(nn.Module):
         k *= self.scaling
         q = q.view(bsz, h, w, self.num_heads, -1).permute(0, 3, 1, 2, 4) #(b n h w d1)
         k = k.view(bsz, h, w, self.num_heads, -1).permute(0, 3, 1, 2, 4) #(b n h w d1)
+        
         qr = theta_shift(q, sin, cos) #(b n h w d1)
         kr = theta_shift(k, sin, cos) #(b n h w d1)
 
@@ -285,6 +281,7 @@ class VisionRetentionAll(nn.Module):
         kr = kr.flatten(2, 3) #(b n l d1)
         vr = v.reshape(bsz, h, w, self.num_heads, -1).permute(0, 3, 1, 2, 4) #(b n h w d2)
         vr = vr.flatten(2, 3) #(b n l d2)
+        
         qk_mat = qr @ kr.transpose(-1, -2) #(b n l l)
         qk_mat = qk_mat + mask  #(b n l l)
         qk_mat = torch.softmax(qk_mat, -1) #(b n l l)
@@ -294,51 +291,8 @@ class VisionRetentionAll(nn.Module):
         output = self.out_proj(output)
         return output
 
-class FeedForwardNetwork(nn.Module):
-    def __init__(
-        self,
-        embed_dim,
-        ffn_dim,
-        activation_fn=F.gelu,
-        dropout=0.0,
-        activation_dropout=0.0,
-        layernorm_eps=1e-6,
-        subln=False,
-        subconv=True
-        ):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.activation_fn = activation_fn
-        self.activation_dropout_module = torch.nn.Dropout(activation_dropout)
-        self.dropout_module = torch.nn.Dropout(dropout)
-        self.fc1 = nn.Linear(self.embed_dim, ffn_dim)
-        self.fc2 = nn.Linear(ffn_dim, self.embed_dim)
-        self.ffn_layernorm = nn.LayerNorm(ffn_dim, eps=layernorm_eps) if subln else None
-        self.dwconv = DWConv2d(ffn_dim, 3, 1, 1) if subconv else None
 
-    def reset_parameters(self):
-        self.fc1.reset_parameters()
-        self.fc2.reset_parameters()
-        if self.ffn_layernorm is not None:
-            self.ffn_layernorm.reset_parameters()
 
-    def forward(self, x: torch.Tensor):
-        '''
-        x: (b h w c)
-        '''
-        x = self.fc1(x)
-        x = self.activation_fn(x)
-        x = self.activation_dropout_module(x)
-        residual = x
-        if self.dwconv is not None:
-            x = self.dwconv(x)
-        if self.ffn_layernorm is not None:
-            x = self.ffn_layernorm(x)
-        x = x + residual
-        x = self.fc2(x)
-        x = self.dropout_module(x)
-        return x
-    
 class RetBlock(nn.Module):
 
     def __init__(self, retention: str, embed_dim: int, num_heads: int, ffn_dim: int, drop_path=0., layerscale=False, layer_init_values=1e-5):
@@ -346,16 +300,18 @@ class RetBlock(nn.Module):
         self.layerscale = layerscale
         self.embed_dim = embed_dim
         self.retention_layer_norm = nn.LayerNorm(self.embed_dim, eps=1e-6)
-        assert retention in ['chunk', 'whole']
+        # self.queriesNorm = nn.LayerNorm(self.embed_dim, eps=1e-6)
+        # self.retention = VisionRetentionAll(embed_dim, num_heads)
         if retention == 'chunk':
             self.retention = VisionRetentionChunk(embed_dim, num_heads)
         else:
             self.retention = VisionRetentionAll(embed_dim, num_heads)
         self.drop_path = DropPath(drop_path)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim, eps=1e-6)
-        self.ffn = FeedForwardNetwork(embed_dim, ffn_dim)
+        #FIXME:这里将ffn里面的一个dwconv关闭了
+        self.ffn = FeedForwardNetwork(embed_dim, ffn_dim,subconv=False)
         self.pos = DWConv2d(embed_dim, 3, 1, 1)
-
+        self.crossAttention = nn.MultiheadAttention(embed_dim, num_heads,batch_first=True)
         if layerscale:
             self.gamma_1 = nn.Parameter(layer_init_values * torch.ones(1, 1, 1, embed_dim),requires_grad=True)
             self.gamma_2 = nn.Parameter(layer_init_values * torch.ones(1, 1, 1, embed_dim),requires_grad=True)
@@ -363,42 +319,127 @@ class RetBlock(nn.Module):
     def forward(
             self,
             x: torch.Tensor, 
+            queries ,
             incremental_state=None,
             chunkwise_recurrent=False,
             retention_rel_pos=None
         ):
         x = x + self.pos(x)
+        
         if self.layerscale:
             x = x + self.drop_path(self.gamma_1 * self.retention(self.retention_layer_norm(x), retention_rel_pos, chunkwise_recurrent, incremental_state))
             x = x + self.drop_path(self.gamma_2 * self.ffn(self.final_layer_norm(x)))
         else:
             x = x + self.drop_path(self.retention(self.retention_layer_norm(x), retention_rel_pos, chunkwise_recurrent, incremental_state))
             x = x + self.drop_path(self.ffn(self.final_layer_norm(x)))
-        return x
-    
-class PatchMerging(nn.Module):
-    r""" Patch Merging Layer.
+        b , h , w , c = x.shape
+        x = x.reshape( b , -1 ,c)
+        queries = queries +  self.crossAttention(self.retention_layer_norm(queries) , x , x , need_weights = False)[0]
+        queries = queries + self.ffn(self.final_layer_norm(queries))
+        x = x.reshape( b , h , w, c)
+        #在这里做cross attention 吧！随机初始化更好还是添加位置编码比较好？
+        return x , queries
 
-    Args:
-        input_resolution (tuple[int]): Resolution of input feature.
-        dim (int): Number of input channels.
-        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
-    """
-    def __init__(self, dim, out_dim, norm_layer=nn.LayerNorm):
+class SegBlock(nn.Module):
+
+    def __init__(self, embed_dim: int, num_heads: int, ffn_dim: int, drop_path=0., layerscale=False, layer_init_values=1e-5):
         super().__init__()
-        self.dim = dim
-        self.reduction = nn.Conv2d(dim, out_dim, 3, 2, 1)
-        self.norm = nn.BatchNorm2d(out_dim)
+        self.layerscale = layerscale
+        self.embed_dim = embed_dim
+        self.retention_layer_norm = nn.LayerNorm(self.embed_dim, eps=1e-6)
+        self.queriesNorm = nn.LayerNorm(self.embed_dim, eps=1e-6)
+        self.mask_attention = MaskAttention(embed_dim, num_heads)
+        self.drop_path = DropPath(drop_path)
+        self.final_layer_norm = nn.LayerNorm(self.embed_dim, eps=1e-6)
+        self.ffn = FeedForwardNetwork(embed_dim, ffn_dim,subconv=False)
+        self.pos = DWConv2d(embed_dim, 3, 1, 1)
+        #FIXME:
+        self.mask_scheduler = MaskScheduler(max_epoch=200)
+        if layerscale:
+            self.gamma_1 = nn.Parameter(layer_init_values * torch.ones(1, 1, 1, embed_dim),requires_grad=True)
+            self.gamma_2 = nn.Parameter(layer_init_values * torch.ones(1, 1, 1, embed_dim),requires_grad=True)
+    # x shape : [ b , h , w ,c]
+    # queries : [b , n ,c]
+    def forward(
+            self,
+            x: torch.Tensor, 
+            queries :torch.Tensor,
+            epoch : int
+        ):
+        b , h , w, c = x.shape
+        _,num_q ,_ = queries.shape
+        
+        x = x + self.pos(x)
+        # b , N , c
+        x = x.reshape(b,-1,c)
+        x_with_q = torch.cat((queries , x) , dim=1)
+        # now generate mask
 
-    def forward(self, x):
-        '''
-        x: B H W C
-        '''
-        x = x.permute(0, 3, 1, 2).contiguous()  #(b c h w)
-        x = self.reduction(x) #(b oc oh ow)
-        x = self.norm(x)
-        x = x.permute(0, 2, 3, 1) #(b oh ow oc)
-        return x
+        
+        #FIXME: 使用了full 
+        mask_logits =  x @ queries.transpose(-1, -2) # b , N ,numq
+        
+        # region_id = mask_logits.argmax(dim=-1)
+        mask = torch.ones(b,num_q+h*w , num_q+h*w,dtype=x_with_q.dtype,device=x_with_q.device)
+        # B, N , N 
+
+        # mask[:,num_q:,num_q:] = region_id.unsqueeze(-1) == region_id.unsqueeze(-2) 
+        mask[:,num_q:,num_q:]  = self.mask_scheduler(mask_logits, epoch)
+        
+        
+        # #FIXME: 
+        # mask_logist = x @ queries.transpose(-1, -2) # b , N ,numq 
+        # region_id = mask_logist .argmax(dim=-1) 
+        # mask = torch.ones(b,num_q+h*w , num_q+h*w,dtype=x_with_q.dtype,device=x_with_q.device) # B, N , N 
+        # mask[:,num_q:,num_q:] = region_id.unsqueeze(-1) == region_id.unsqueeze(-2)
+        
+        if self.layerscale:
+            x_with_q = x_with_q + self.drop_path(self.gamma_1 * self.mask_attention(self.retention_layer_norm(x_with_q), mask , h ,w))
+            x_with_q = x_with_q + self.drop_path(self.gamma_2 * self.ffn(self.final_layer_norm(x_with_q)))
+        else:
+            x_with_q = x_with_q + self.drop_path(self.mask_attention(self.retention_layer_norm(x_with_q) , mask , h , w))
+            x_with_q = x_with_q + self.drop_path(self.ffn(self.final_layer_norm(x_with_q)))
+
+        x = x_with_q[:,num_q:,:].reshape(b,h,w,c)
+        queries = x_with_q[:,:num_q,:]
+        return x , queries 
+class SegLayer(nn.Module):
+    def __init__(self, embed_dim, out_dim, depth, num_heads,
+                 ffn_dim=96., drop_path=0., norm_layer=nn.LayerNorm, 
+                 downsample: PatchMerging=None, 
+                 layerscale=False, layer_init_values=1e-5):
+
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.depth = depth
+        
+        # build blocks
+        self.blocks = nn.ModuleList([
+            SegBlock(embed_dim, num_heads, ffn_dim, 
+                     drop_path[i] if isinstance(drop_path, list) else drop_path, layerscale, layer_init_values)
+            for i in range(depth)])
+
+        # patch merging layer
+        if downsample is not None:
+            self.downsample = downsample(dim=embed_dim, out_dim=out_dim, norm_layer=norm_layer)
+            self.queriesLinear = nn.Linear(embed_dim , out_dim)
+        else:
+            self.downsample = None
+            self.queriesLinear = None
+        
+        
+    def forward(self, x , queries , epoch):
+        b, h, w, d = x.size()
+        b,n,d = queries.size()
+    
+        
+        for blk in self.blocks:
+            x  , queries= blk(x , queries , epoch)
+                
+        if self.downsample is not None:
+            x = self.downsample(x)
+            queries = self.queriesLinear(queries)
+        return x , queries
     
 class BasicLayer(nn.Module):
     """ A basic Swin Transformer layer for one stage.
@@ -430,7 +471,7 @@ class BasicLayer(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.depth = depth
-        self.use_checkpoint = use_checkpoint
+        self.use_checkpoint = use_checkpoint  
         self.chunkwise_recurrent = chunkwise_recurrent
         if chunkwise_recurrent:
             flag = 'chunk'
@@ -447,78 +488,38 @@ class BasicLayer(nn.Module):
         # patch merging layer
         if downsample is not None:
             self.downsample = downsample(dim=embed_dim, out_dim=out_dim, norm_layer=norm_layer)
+            self.queriesLinear = nn.Linear(embed_dim , out_dim)
         else:
             self.downsample = None
+            self.queriesLinear = None
 
-    def forward(self, x):
+    def forward(self, x , queries):
         b, h, w, d = x.size()
+        b,n,d = queries.size()
+        
         rel_pos = self.Relpos((h, w), chunkwise_recurrent=self.chunkwise_recurrent)
+        
         for blk in self.blocks:
             if self.use_checkpoint:
                 tmp_blk = partial(blk, incremental_state=None, chunkwise_recurrent=self.chunkwise_recurrent, retention_rel_pos=rel_pos)
                 x = checkpoint.checkpoint(tmp_blk, x)
             else:
-                x = blk(x, incremental_state=None, chunkwise_recurrent=self.chunkwise_recurrent, retention_rel_pos=rel_pos)
+                x , queries= blk(x , queries, incremental_state=None, chunkwise_recurrent=self.chunkwise_recurrent, retention_rel_pos=rel_pos)
+                
         if self.downsample is not None:
             x = self.downsample(x)
-        return x
-    
-class LayerNorm2d(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.norm = nn.LayerNorm(dim, eps=1e-6)
+            queries = self.queriesLinear(queries)
+            
+        return x , queries
 
-    def forward(self, x: torch.Tensor):
-        '''
-        x: (b c h w)
-        '''
-        x = x.permute(0, 2, 3, 1).contiguous() #(b h w c)
-        x = self.norm(x) #(b h w c)
-        x = x.permute(0, 3, 1, 2).contiguous()
-        return x
-    
-class PatchEmbed(nn.Module):
-    r""" Image to Patch Embedding
 
-    Args:
-        img_size (int): Image size.  Default: 224.
-        patch_size (int): Patch token size. Default: 4.
-        in_chans (int): Number of input image channels. Default: 3.
-        embed_dim (int): Number of linear projection output channels. Default: 96.
-        norm_layer (nn.Module, optional): Normalization layer. Default: None
-    """
-
-    def __init__(self, in_chans=3, embed_dim=96, norm_layer=None):
-        super().__init__()
-        self.in_chans = in_chans
-        self.embed_dim = embed_dim
-
-        self.proj = nn.Sequential(
-            nn.Conv2d(in_chans, embed_dim//2, 3, 2, 1),
-            nn.BatchNorm2d(embed_dim//2),
-            nn.GELU(),
-            nn.Conv2d(embed_dim//2, embed_dim//2, 3, 1, 1),
-            nn.BatchNorm2d(embed_dim//2),
-            nn.GELU(),
-            nn.Conv2d(embed_dim//2, embed_dim, 3, 2, 1),
-            nn.BatchNorm2d(embed_dim),
-            nn.GELU(),
-            nn.Conv2d(embed_dim, embed_dim, 3, 1, 1),
-            nn.BatchNorm2d(embed_dim)
-        )
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        x = self.proj(x).permute(0, 2, 3, 1) #(b h w c)
-        return x
-    
-class VisRetNet(nn.Module):
+class VisSegNet_Ushape(nn.Module):
 
     def __init__(self, in_chans=3, num_classes=1000,
                  embed_dims=[96, 192, 384, 768], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  init_values=[1, 1, 1, 1], heads_ranges=[3, 3, 3, 3], mlp_ratios=[3, 3, 3, 3], drop_path_rate=0.1, norm_layer=nn.LayerNorm, 
                  patch_norm=True, use_checkpoints=[False, False, False, False], chunkwise_recurrents=[True, True, False, False], projection=1024,
-                 layerscales=[False, False, False, False], layer_init_values=1e-6):
+                 layerscales=[False, False, False, False], layer_init_values=1e-6 ):
         super().__init__()
 
         self.num_classes = num_classes
@@ -528,33 +529,50 @@ class VisRetNet(nn.Module):
         self.num_features = embed_dims[-1]
         self.mlp_ratios = mlp_ratios
 
+        # FIXME : numq = ？
+        num_q = 8
+        self.q = nn.Parameter(torch.randn(1, num_q, self.embed_dim) * 0.02)
+
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(in_chans=in_chans, embed_dim=embed_dims[0],
             norm_layer=norm_layer if self.patch_norm else None)
-
+        
 
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
-
         # build layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
-            layer = BasicLayer(
-                embed_dim=embed_dims[i_layer],
-                out_dim=embed_dims[i_layer+1] if (i_layer < self.num_layers - 1) else None,
-                depth=depths[i_layer],
-                num_heads=num_heads[i_layer],
-                init_value=init_values[i_layer],
-                heads_range=heads_ranges[i_layer],
-                ffn_dim=int(mlp_ratios[i_layer]*embed_dims[i_layer]),
-                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
-                norm_layer=norm_layer,
-                chunkwise_recurrent=chunkwise_recurrents[i_layer],
-                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
-                use_checkpoint=use_checkpoints[i_layer],
-                layerscale=layerscales[i_layer],
-                layer_init_values=layer_init_values
-            )
+            if i_layer == 0:  
+                layer = BasicLayer(
+                    embed_dim=embed_dims[i_layer],
+                    out_dim=embed_dims[i_layer+1] if (i_layer < self.num_layers - 1) else None,
+                    depth=depths[i_layer],
+                    num_heads=num_heads[i_layer],
+                    init_value=init_values[i_layer],
+                    heads_range=heads_ranges[i_layer],
+                    ffn_dim=int(mlp_ratios[i_layer]*embed_dims[i_layer]),
+                    drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                    norm_layer=norm_layer,
+                    chunkwise_recurrent=chunkwise_recurrents[i_layer],
+                    downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
+                    use_checkpoint=use_checkpoints[i_layer],
+                    layerscale=layerscales[i_layer],
+                    layer_init_values=layer_init_values
+                )
+            else:
+                layer = SegLayer(
+                    embed_dim=embed_dims[i_layer],
+                    out_dim=embed_dims[i_layer+1] if (i_layer < self.num_layers - 1) else None,
+                    depth=depths[i_layer],
+                    num_heads=num_heads[i_layer],
+                    ffn_dim=int(mlp_ratios[i_layer]*embed_dims[i_layer]),
+                    drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                    norm_layer=norm_layer,
+                    downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
+                    layerscale=layerscales[i_layer],
+                    layer_init_values=layer_init_values
+                )
             self.layers.append(layer)
             
         self.proj = nn.Linear(self.num_features, projection)
@@ -585,11 +603,26 @@ class VisRetNet(nn.Module):
     def no_weight_decay_keywords(self):
         return {'relative_position_bias_table'}
 
-    def forward_features(self, x):
+    def forward_features(self, x , epoch):
+        b , c , h , w = x.shape
+        num_q = 8
+        queries = torch.randn(b,num_q , self.embed_dim)
+        queries = queries / queries.norm(dim=-1, keepdim=True)
+        
+        #  b c , h ,w
         x = self.patch_embed(x)
+        #FIXME : N , C -> B , N , C
+        # queries = self.q.weight[None , :].expand(x.shape[0] , -1,-1)
+        queries = self.q.expand(b , -1,-1)
+        
+        firstlayer = self.layers[0]
+        
+        # 在这个layer内部，每个block都会做一次corss attention
 
-        for layer in self.layers:
-            x = layer(x)
+        x  , queries = firstlayer(x ,queries)
+        
+        for layer in self.layers[1:]:
+            x , queries = layer(x , queries , epoch)
 
         x = self.proj(x) #(b h w c)
         x = self.norm(x.permute(0, 3, 1, 2)).flatten(2, 3) #(b c h*w)
@@ -599,32 +632,16 @@ class VisRetNet(nn.Module):
         x = torch.flatten(x, 1)
         return x
 
-    def forward(self, x):
-        x = self.forward_features(x)
+    def forward(self, x ,epoch):
+        x = self.forward_features(x , epoch)
         x = self.head(x)
         return x
 
 
 
 @register_model
-def RMT_T3(args):
-    model = VisRetNet(
-        embed_dims=[64, 128, 256, 512],
-        depths=[2, 2, 8, 2],
-        num_heads=[4, 4, 8, 16],
-        init_values=[2, 2, 2, 2],
-        heads_ranges=[4, 4, 6, 6],
-        mlp_ratios=[3, 3, 3, 3],
-        drop_path_rate=0.1,
-        chunkwise_recurrents=[True, True, False, False],
-        layerscales=[False, False, False, False]
-    )
-    model.default_cfg = _cfg()
-    return model
-
-@register_model
-def RMT_S(args):
-    model = VisRetNet(
+def VisSegNet_Ushape_S(args):
+    model = VisSegNet_Ushape(
         embed_dims=[64, 128, 256, 512],
         depths=[3, 4, 18, 4],
         num_heads=[4, 4, 8, 16],
@@ -634,44 +651,6 @@ def RMT_S(args):
         drop_path_rate=0.15,
         chunkwise_recurrents=[True, True, True, False],
         layerscales=[False, False, False, False]
-    )
-    model.default_cfg = _cfg()
-    return model
-
-
-
-@register_model
-def RMT_M2(args):
-    model = VisRetNet(
-        embed_dims=[80, 160, 320, 512],
-        depths=[4, 8, 25, 8],
-        num_heads=[5, 5, 10, 16],
-        init_values=[2, 2, 2, 2],
-        heads_ranges=[5, 5, 6, 6],
-        mlp_ratios=[4, 4, 3, 3],
-        drop_path_rate=0.4,
-        chunkwise_recurrents=[True, True, True, False],
-        layerscales=[False, False, True, True],
-        layer_init_values=1e-6
-    )
-    model.default_cfg = _cfg()
-    return model
-
-
-
-@register_model
-def RMT_L6(args):
-    model = VisRetNet(
-        embed_dims=[112, 224, 448, 640],
-        depths=[4, 8, 25, 8],
-        num_heads=[7, 7, 14, 20],
-        init_values=[2, 2, 2, 2],
-        heads_ranges=[6, 6, 6, 6],
-        mlp_ratios=[4, 4, 3, 3],
-        drop_path_rate=0.5,
-        chunkwise_recurrents=[True, True, True, False],
-        layerscales=[False, False, True, True],
-        layer_init_values=1e-6
     )
     model.default_cfg = _cfg()
     return model
