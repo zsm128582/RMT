@@ -416,6 +416,9 @@ def main(args):
         return
 
     print(f"Start training for {args.epochs} epochs")
+    giveEpochAsArgs = "SegNet" in args.model
+    if giveEpochAsArgs :
+        print("use softmax -> gumble softmax anneal")
     start_time = time.time()
     max_accuracy = 0.0
     for epoch in range(args.start_epoch, args.epochs):
@@ -427,7 +430,7 @@ def main(args):
             optimizer, device, epoch, loss_scaler,
             args.clip_grad, model_ema, mixup_fn,
             set_training_mode=args.finetune=='',  # keep in eval mode during finetuning
-            giveEpochAsArgs = args.model=='SegNet'
+            giveEpochAsArgs = giveEpochAsArgs
         )
 
         lr_scheduler.step(epoch)
