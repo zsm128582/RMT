@@ -72,7 +72,7 @@ def train_one_epoch(lr_scheduler, model: torch.nn.Module, criterion: Distillatio
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, device):
+def evaluate(data_loader, model, device , epochAsArgs = False , epoch = 200):
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -87,7 +87,10 @@ def evaluate(data_loader, model, device):
 
         # compute output
         with torch.amp.autocast('cuda'):
-            output = model(images)
+            if epochAsArgs:
+                output = model(images , epoch)
+            else:
+                output = model(images)
             loss = criterion(output, target)
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5))

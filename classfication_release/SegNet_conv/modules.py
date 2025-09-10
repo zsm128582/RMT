@@ -19,7 +19,6 @@ from functools import partial
 from einops import einsum
 
 
-
 def rotate_every_two(x):
     x1 = x[:, :, :, :, ::2]
     x2 = x[:, :, :, :, 1::2]

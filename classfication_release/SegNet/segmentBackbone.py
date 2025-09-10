@@ -20,6 +20,60 @@ from einops import einsum
 from .modules import PatchEmbed , PatchMerging , DWConv2d , FeedForwardNetwork,RetNetRelPos2d,MemoryEfficientSwish,theta_shift,RotateModule
 import os
 
+import matplotlib.pyplot as plt
+
+def visualize_query_partition(logits: torch.Tensor, h: int, w: int, query_id: int = None, temperature: float = 1.0 , savePath = None):
+    """
+    可视化 queries 对图像 patch 的分区效果
+
+    Args:
+        logits: [b, N, num_q] 其中 N = h * w
+        h, w: 图像patch网格大小
+        query_id: 可选，指定查看某个 query 的 soft mask
+        temperature: softmax 温度
+    """
+    b, N, num_q = logits.shape
+    assert N == h * w, f"输入的logits尺寸和h*w不一致: {N} vs {h*w}"
+    
+    # 只取 batch 内第一个样本
+    logits = logits[0]  # (N, num_q)
+
+    # softmax 概率
+    p = torch.softmax(logits / temperature, dim=-1)  # (N, num_q)
+
+    # 1. argmax 分区图
+    region_id = p.argmax(dim=-1).reshape(h, w).cpu().numpy()
+
+    # 2. confidence map
+    confidence = p.max(dim=-1).values.reshape(h, w).cpu().numpy()
+
+    fig, axs = plt.subplots(1, 2 + (1 if query_id is not None else 0), figsize=(12, 5))
+
+    # 左边：argmax 分区
+    axs[0].imshow(region_id, cmap="tab20")
+    axs[0].set_title("Query assignment (argmax)")
+    axs[0].axis("off")
+
+    # 中间：confidence map
+    im1 = axs[1].imshow(confidence, cmap="viridis")
+    axs[1].set_title("Assignment confidence")
+    axs[1].axis("off")
+    fig.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
+
+    # 右边：单个 query 的 soft mask
+    if query_id is not None:
+        mask_q = p[:, query_id].reshape(h, w).cpu().numpy()
+        im2 = axs[2].imshow(mask_q, cmap="viridis")
+        axs[2].set_title(f"Soft mask for query {query_id}")
+        axs[2].axis("off")
+        fig.colorbar(im2, ax=axs[2], fraction=0.046, pad=0.04)
+
+    plt.tight_layout()
+    if savePath is not None:
+        if not os.path.exists(savePath):
+            os.makedirs(savePath)
+        plt.savefig(os.path.join(savePath , f"query_partition_{time.time()}.png"))
+
 class MaskScheduler:
     def __init__(self, 
                  max_epoch: int,
@@ -377,8 +431,7 @@ class SegBlock(nn.Module):
         # b , N , c
         x = x.reshape(b,-1,c)
         x_with_q = torch.cat((queries , x) , dim=1)
-        
-        #FIXME : 完了，F.normalize的默认归一化维度是1，所以现在感觉很奇怪,
+    
         # mask_logits =  F.normalize(x) @ F.normalize(queries.transpose(-1, -2)) # b , N ,numq
         mask_logits = F.normalize(x , dim=-1) @ F.normalize(queries,dim=-1).transpose(-1, -2)
         mask_logits = mask_logits * self.logit_temperature.float()

@@ -48,6 +48,11 @@ archs = {
             # 'Half' : HalfRestomer_defalt
          }
 
+use_gumbel_softmax = [
+    'SegNet',
+    'VisSegNet_conv_T'
+]
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
@@ -182,6 +187,7 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true', help='Perform evaluation only')
+    parser.add_argument('--resume_epoch', default=200, type=int)
     parser.add_argument('--dist-eval', action='store_true', default=False, help='Enabling distributed evaluation')
     parser.add_argument('--num_workers', default=10, type=int)
     parser.add_argument('--pin-mem', action='store_true',
@@ -392,12 +398,15 @@ def main(args):
                 loss_scaler.load_state_dict(checkpoint['scaler'])
         if 'max_accuracy' in checkpoint:
             max_accuracy = checkpoint['max_accuracy']
-
+    print(f"Start training for {args.epochs} epochs")
+    giveEpochAsArgs = args.model in use_gumbel_softmax
+    if giveEpochAsArgs :
+        print("use softmax -> gumble softmax anneal")
     if args.eval:
-        #if args.resume == '':
-        tmp = f"{args.output_dir}/downtarget.pth"
-        if os.path.exists(tmp):
-            args.resume = tmp
+        if args.resume == '':
+            tmp = f"{args.output_dir}/downtarget.pth"
+            if os.path.exists(tmp):
+                args.resume = tmp
         flag = os.path.exists(args.resume)
         if args.resume and flag:
             if args.resume.startswith('https'):
@@ -408,17 +417,13 @@ def main(args):
             model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
             if args.model_ema:                
                 model_ema.ema.load_state_dict(checkpoint['model_ema'], strict=True)
-        test_stats = evaluate(data_loader_val, model, device)
+        test_stats = evaluate(data_loader_val, model, device , epochAsArgs=giveEpochAsArgs , epoch = args.resume_epoch)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         if model_ema is not None:
-            test_stats_ema = evaluate(data_loader_val, model_ema.ema, device)
+            test_stats_ema = evaluate(data_loader_val, model, device , epochAsArgs=giveEpochAsArgs , epoch = args.resume_epoch)
             print(f"Accuracy of the network_ema on the {len(dataset_val)} test images: {test_stats_ema['acc1']:.1f}%")
         return
 
-    print(f"Start training for {args.epochs} epochs")
-    giveEpochAsArgs = "SegNet" in args.model
-    if giveEpochAsArgs :
-        print("use softmax -> gumble softmax anneal")
     start_time = time.time()
     max_accuracy = 0.0
     for epoch in range(args.start_epoch, args.epochs):
@@ -482,11 +487,11 @@ def main(args):
                         'max_accuracy': max_accuracy,
                     }, f"{args.output_dir}/backup{epoch}.pth")
 
-        test_stats = evaluate(data_loader_val, model, device)
+        test_stats = evaluate(data_loader_val, model, device , epochAsArgs=giveEpochAsArgs , epoch = epoch)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         test_stats_ema = None
         if model_ema is not None:
-            test_stats_ema = evaluate(data_loader_val, model_ema.ema, device)
+            test_stats_ema = evaluate(data_loader_val, model, device , epochAsArgs=giveEpochAsArgs , epoch = epoch)
             print(f"Accuracy of the network_ema on the {len(dataset_val)} test images: {test_stats_ema['acc1']:.1f}%")
         max_accuracy = max(max_accuracy, test_stats["acc1"])
         if model_ema is not None:
