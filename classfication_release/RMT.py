@@ -138,16 +138,7 @@ class RetNetRelPos2d(nn.Module):
             retention_rel_pos = ((sin, cos), mask)
 
         return retention_rel_pos
-
-class RotateModule(nn.Module):
     
-    def __init__(self):
-        super(RotateModule,self).__init__()
-    
-    def forward(self,q , sin , cos):
-        return theta_shift(q,sin,cos)
-
-
 class VisionRetentionChunk(nn.Module):
 
     def __init__(self, embed_dim, num_heads, value_factor=1):
@@ -165,8 +156,6 @@ class VisionRetentionChunk(nn.Module):
 
 
         self.out_proj = nn.Linear(embed_dim*self.factor, embed_dim, bias=True)
-
-        self.rotateModule = RotateModule()
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -192,14 +181,10 @@ class VisionRetentionChunk(nn.Module):
         lepe = self.lepe(v)
 
         k *= self.scaling
-        # bhw H c
         q = q.view(bsz, h, w, self.num_heads, self.key_dim).permute(0, 3, 1, 2, 4) #(b n h w d1)
         k = k.view(bsz, h, w, self.num_heads, self.key_dim).permute(0, 3, 1, 2, 4) #(b n h w d1)
-        
-        qr = self.rotateModule(q,sin,cos)
-        kr = self.rotateModule(q , sin , cos) 
-        # qr = theta_shift(q, sin, cos)
-        # kr = theta_shift(k, sin, cos)
+        qr = theta_shift(q, sin, cos)
+        kr = theta_shift(k, sin, cos)
 
         '''
         qr: (b n h w d1)
@@ -212,22 +197,17 @@ class VisionRetentionChunk(nn.Module):
         v = v.reshape(bsz, h, w, self.num_heads, -1).permute(0, 1, 3, 2, 4) #(b h n w d2)
 
         qk_mat_w = qr_w @ kr_w.transpose(-1, -2) #(b h n w w)
-        
         qk_mat_w = qk_mat_w + mask_w  #(b h n w w)
         qk_mat_w = torch.softmax(qk_mat_w, -1) #(b h n w w)
-
-        #  b h w c
         v = torch.matmul(qk_mat_w, v) #(b h n w d2)
 
 
         qr_h = qr.permute(0, 3, 1, 2, 4) #(b w n h d1)
         kr_h = kr.permute(0, 3, 1, 2, 4) #(b w n h d1)
-
-        #  bwhc
         v = v.permute(0, 3, 2, 1, 4) #(b w n h d2)
 
         qk_mat_h = qr_h @ kr_h.transpose(-1, -2) #(b w n h h)
-        qk_mat_h = qk_mat_h  + mask_h  #(b w n h h)
+        qk_mat_h = qk_mat_h + mask_h  #(b w n h h)
         qk_mat_h = torch.softmax(qk_mat_h, -1) #(b w n h h)
         output = torch.matmul(qk_mat_h, v) #(b w n h d2)
         

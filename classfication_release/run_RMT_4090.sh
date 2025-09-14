@@ -1,0 +1,2 @@
+
+torchrun --nproc_per_node=2  main.py --warmup-epochs 5 --model RMT_T  --data-path /data2/ImageNet1k/data  --num_workers 48  --batch-size 128  --drop-path 0.05  --epoch 200 --dist-eval  --output_dir /home/zengshimao/code/RMT/classfication_release/work_dirs/RMT/RMT_T
