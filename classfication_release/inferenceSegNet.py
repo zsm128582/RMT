@@ -1,4 +1,5 @@
 from SegNet.segmentBackbone import VisSegNet_S
+from SegNet_conv.segmentBackbone import VisSegNet_conv_T
 import torch
 import cv2
 from PIL import Image
@@ -198,13 +199,16 @@ def get_args_parser():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
-    resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/firstTest/backup200.pth"
-
+    resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/conv/backup70.pth"
     checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
-    model = VisSegNet_S(None)
+    model = VisSegNet_conv_T(None)
+
+    # resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/gumbel-softmax/best.pth"
+    # checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
+    # model = VisSegNet_S(None)
+
     model.load_state_dict(checkpoint['model'], strict=False)
     model.eval()
-
 
     #归一化
     transform = build_transform(False, args)
@@ -215,8 +219,7 @@ if __name__ == '__main__':
     
     res = model(testImage)
     print(res)
-    
-    
+
 """"
 可视化方法：
 import matplotlib.pyplot as plt
