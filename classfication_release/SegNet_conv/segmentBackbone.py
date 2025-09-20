@@ -739,7 +739,6 @@ class SegBlock(nn.Module):
         x = x.reshape(b,-1,c)
         x_with_q = torch.cat((queries , x) , dim=1)
         
-        #FIXME : 完了，F.normalize的默认归一化维度是1，所以现在感觉很奇怪,
         mask_logits = F.normalize(x , dim=-1) @ F.normalize(queries,dim=-1).transpose(-1, -2)
         mask_logits = mask_logits * self.logit_temperature.float()
         # mask_logits =  F.normalize(x) @ F.normalize(queries.transpose(-1, -2)) # b , N ,numq

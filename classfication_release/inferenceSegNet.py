@@ -8,7 +8,8 @@ from torchvision.datasets.folder import ImageFolder, default_loader
 from timm.data import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 import argparse
-
+import matplotlib.pyplot as plt
+import numpy as np
 
 
 def build_transform(is_train, args):
@@ -193,22 +194,72 @@ def get_args_parser():
     return parser
 
 
-# 打开图像文件
+def visualize_feature_maps(feature_maps):
+    if feature_maps is None:
+        return 
+    feature_maps = feature_maps.permute(0,3,1,2)
+    b , c , h , w = feature_maps.shape
+
+    print(feature_maps.shape)
+    if feature_maps.ndim == 4:
+        feature_maps = feature_maps.squeeze(0)
+
+    # 计算所有通道的平均值
+    aggregated_map = torch.mean(feature_maps, dim=0)
+    aggregated_map_np = aggregated_map.detach().cpu().numpy()
+
+    # # 计算所有通道的最大值
+    # aggregated_map = torch.max(feature_maps, dim=0)[0] # torch.max 返回值和索引，我们只需要值
+    # aggregated_map_np = aggregated_map.detach().cpu().numpy()
+
+    # 归一化到 [0, 1] 范围，以便于可视化
+    min_val = np.min(aggregated_map_np)
+    max_val = np.max(aggregated_map_np)
+    normalized_map = (aggregated_map_np - min_val) / (max_val - min_val)
+
+    # 使用 matplotlib 可视化
+    plt.imshow(normalized_map, cmap='viridis') # 'viridis' 是一种常用的热力图颜色，magma' 也是一种很棒的热力图颜色
+
+    plt.colorbar(label='Activation Intensity')
+    plt.title('Mean Aggregation of Feature Map')
+    plt.axis('off') # 不显示坐标轴
+    plt.show()
+    pass
+
+
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
-    resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/conv/backup70.pth"
+    resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/conv/best.pth"
     checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
     model = VisSegNet_conv_T(None)
 
     # resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/gumbel-softmax/best.pth"
     # checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
     # model = VisSegNet_S(None)
+    
+
+
+
+    feature_maps = None 
+    queries = None
+    def hook_fn(module , input , output):
+        global feature_maps
+        feature_maps , queries = output
+        
+        
+    target_layer = dict(model.named_modules())["layers.0"]
+    hook = target_layer.register_forward_hook(hook_fn)
+
+
+
 
     model.load_state_dict(checkpoint['model'], strict=False)
     model.eval()
+
+
 
     #归一化
     transform = build_transform(False, args)
@@ -216,9 +267,13 @@ if __name__ == '__main__':
     dataset = datasets.ImageFolder(root, transform=transform)
     testImage , target = dataset.__getitem__(0)
     testImage = torch.unsqueeze(testImage, 0)
-    
-    res = model(testImage)
+    with torch.no_grad():
+        res = model(testImage,200)
+    hook.remove()
     print(res)
+
+    visualize_feature_maps(feature_maps)
+    
 
 """"
 可视化方法：
