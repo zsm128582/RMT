@@ -700,6 +700,7 @@ class VisSegNet(nn.Module):
 @register_model
 def VisSegNet_S(args):
     model = VisSegNet(
+        num_classes= args.nb_classes,
         embed_dims=[64, 128, 256, 512],
         depths=[3, 4, 18, 4],
         num_heads=[4, 4, 8, 16],
@@ -716,6 +717,7 @@ def VisSegNet_S(args):
 @register_model
 def VisSegNet_T(args):
     model = VisSegNet(
+        num_classes= args.nb_classes,
         embed_dims=[64, 128, 256, 512],
         depths=[2, 2,8,2],
         num_heads=[4, 4, 8, 16],

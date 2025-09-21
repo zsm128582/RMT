@@ -20,6 +20,8 @@ from mmseg.models import build_segmentor
 from mmseg.utils import collect_env, get_root_logger
 
 
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')
     parser.add_argument('config', help='train config file path')

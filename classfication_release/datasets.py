@@ -2,7 +2,7 @@
 # All rights reserved.
 import os
 import json
-
+import random
 from torchvision import datasets, transforms
 from torchvision.datasets.folder import ImageFolder, default_loader
 
@@ -52,6 +52,37 @@ class INatDataset(ImageFolder):
 
     # __getitem__ and __len__ inherited from ImageFolder
 
+class ImageNetSubset(datasets.ImageFolder):
+    def __init__(self, root, transform=None, num_classes=100, seed=42):
+        super().__init__(root, transform=transform)
+
+        # 所有类别（子目录名）
+        all_classes = sorted(self.class_to_idx.keys())
+
+        # 随机选取 num_classes 个类别，保证复现
+        rng = random.Random(seed)
+        # print("*"*30+str(num_classes))
+        # print(all_classes)
+        selected_classes = rng.sample(all_classes, num_classes)
+        selected_classes = sorted(selected_classes)
+
+        # 构造新的 class_to_idx
+        new_class_to_idx = {cls_name: i for i, cls_name in enumerate(selected_classes)}
+
+        # 过滤 samples
+        new_samples = []
+        for path, target in self.samples:
+            cls_name = self.classes[target]
+            if cls_name in new_class_to_idx:
+                new_samples.append((path, new_class_to_idx[cls_name]))
+
+        # 替换掉原始属性
+        self.samples = new_samples
+        self.targets = [s[1] for s in new_samples]
+        self.classes = selected_classes
+        self.class_to_idx = new_class_to_idx
+
+
 
 def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
@@ -71,7 +102,11 @@ def build_dataset(is_train, args):
         dataset = INatDataset(args.data_path, train=is_train, year=2019,
                               category=args.inat_category, transform=transform)
         nb_classes = dataset.nb_classes
-
+    elif args.data_set =='IMNET_SUBSET':
+        root = os.path.join(args.data_path, 'train' if is_train else 'val')
+        dataset = ImageNetSubset (root , transform=transform , num_classes = args.sub_classes )
+        nb_classes = args.sub_classes
+        
     return dataset, nb_classes
 
 

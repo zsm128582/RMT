@@ -76,6 +76,10 @@ parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 # Dataset / Model parameters
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
+parser.add_argument('--subset', action='store_true', default=False,
+                    help='train on subset of imagenet1k')
+parser.add_argument('--num-classes', type=int, default=1000, metavar='N',
+                    help='number of label classes (default: 1000) , num class of subset')
 parser.add_argument('--model', default='resnet101', type=str, metavar='MODEL',
                     help='Name of model to train (default: "countception"')
 parser.add_argument('--pretrained', action='store_true', default=False,
@@ -86,8 +90,6 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='Resume full model and optimizer state from checkpoint (default: none)')
 parser.add_argument('--no-resume-opt', action='store_true', default=False,
                     help='prevent resume of optimizer state when resuming model')
-parser.add_argument('--num-classes', type=int, default=1000, metavar='N',
-                    help='number of label classes (default: 1000)')
 parser.add_argument('--gp', default=None, type=str, metavar='POOL',
                     help='Global pool type, one of (fast, avg, max, avgmax, avgmaxc). Model default if None.')
 parser.add_argument('--img-size', type=int, default=None, metavar='N',
@@ -275,6 +277,37 @@ parser.add_argument('--attn_ratio', type=float, default=1.,
 parser.add_argument("--pretrain_path", default=None, type=str)
 parser.add_argument("--evaluate", action='store_true', default=False,
                     help='whether evaluate the model')
+
+
+
+class ImageNetSubDataset(ImageDataset):
+    def __init__(self, root, train=True, num_classes=100, seed=42, **kwargs):
+        # 获取所有类别（子目录名）
+        all_classes = sorted([d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))])
+
+        # 随机选 num_classes 个类，保证复现
+        rng = random.Random(seed)
+        selected_classes = set(rng.sample(all_classes, num_classes))
+
+        # 过滤 samples
+        super().__init__(root=root, **kwargs)
+        self.samples = [(path, target) for path, target in self.samples if self.class_to_idx[self.folders[target]] in [
+            self.class_to_idx[c] for c in selected_classes
+        ]]
+
+        # 重新构建 class_to_idx 和 targets，避免浪费标签空间
+        selected_classes = sorted(selected_classes)
+        new_class_to_idx = {c: i for i, c in enumerate(selected_classes)}
+
+        new_samples = []
+        for path, target in self.samples:
+            orig_class = self.folders[target]
+            if orig_class in new_class_to_idx:
+                new_samples.append((path, new_class_to_idx[orig_class]))
+
+        self.samples = new_samples
+        self.class_to_idx = new_class_to_idx
+        self.folders = selected_classes
 
 def chf(tg,threshold=0.95):
     mats = []
@@ -572,7 +605,10 @@ def main():
     if not os.path.exists(train_dir):
         _logger.error('Training folder does not exist at: {}'.format(train_dir))
         exit(1)
-    dataset_train = ImageDataset(train_dir)
+    if args.subset:
+        dataset_train = ImageNetSubDataset(train_dir , num_classes= args.num_classes )
+    else:
+        dataset_train = ImageDataset(train_dir)
 
     _logger.info("prepare train dataset done")
     collate_fn = None
@@ -632,7 +668,10 @@ def main():
         if not os.path.isdir(eval_dir):
             _logger.error('Validation folder does not exist at: {}'.format(eval_dir))
             exit(1)
-    dataset_eval = ImageDataset(eval_dir)
+    if args.subset:
+        dataset_eval = ImageNetSubDataset(eval_dir , num_classes= args.num_classes )
+    else:
+        dataset_eval = ImageDataset(eval_dir)
 
     loader_eval = create_loader(
         dataset_eval,

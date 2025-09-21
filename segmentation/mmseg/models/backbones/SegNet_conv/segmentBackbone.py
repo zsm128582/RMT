@@ -924,13 +924,14 @@ class ConvLayer(nn.Module):
             x , queries= blk(x , queries)
         
         x = x.permute(0,2,3,1)   
-        
+        # Seg
         if self.downsample is not None:
-            x = self.downsample(x)
+            x_down = self.downsample(x)
             queries = self.queriesLinear(queries)
-        
+            return x , x_down , queries
+        else:
+            return x , x  , queries
             
-        return x , queries
 
 @BACKBONES.register_module()
 class VisSegNet_conv(nn.Module):
