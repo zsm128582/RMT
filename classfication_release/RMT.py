@@ -589,6 +589,7 @@ class VisRetNet(nn.Module):
 @register_model
 def RMT_T3(args):
     model = VisRetNet(
+        num_classes=args.nb_classes,
         embed_dims=[64, 128, 256, 512],
         depths=[2, 2, 8, 2],
         num_heads=[4, 4, 8, 16],

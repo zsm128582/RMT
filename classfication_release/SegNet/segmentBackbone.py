@@ -434,6 +434,7 @@ class SegBlock(nn.Module):
     
         # mask_logits =  F.normalize(x) @ F.normalize(queries.transpose(-1, -2)) # b , N ,numq
         mask_logits = F.normalize(x , dim=-1) @ F.normalize(queries,dim=-1).transpose(-1, -2)
+        # mask_logits = x @ queries.transpose(-1,-2)
         mask_logits = mask_logits * self.logit_temperature.float()
         # mask_logits =  F.normalize(x , dim = -1) @ F.normalize(queries , dim=-1).transpose(-1,-2) # b , N ,numq
         # mask_logits =  x @ queries.transpose(-1,-2) # b , N ,numq

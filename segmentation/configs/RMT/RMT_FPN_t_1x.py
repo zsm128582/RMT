@@ -33,7 +33,7 @@ data = dict(
     workers_per_gpu=2
 )
 
-runner = dict(max_iters=80000, work_dir='path/RMT_FPN_t_1x')
+runner = dict(max_iters=80000, work_dir='work_dirs/RMT_FPN_t_1x')
 
 checkpoint_config = dict(interval=4000)
 
