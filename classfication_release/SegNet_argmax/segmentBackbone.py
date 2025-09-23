@@ -7,7 +7,6 @@ from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 import math
 import torch
 import torch.nn.functional as F
-from einops import rearrange, einsum
 import torch.nn as nn
 from timm.models.layers import DropPath, trunc_normal_
 from timm.models.vision_transformer import VisionTransformer
@@ -19,372 +18,19 @@ from typing import Tuple, Union
 from functools import partial
 from einops import einsum
 from .modules import PatchEmbed , PatchMerging , DWConv2d , FeedForwardNetwork,RetNetRelPos2d,MemoryEfficientSwish,theta_shift,RotateModule
-import os
 
-import matplotlib.pyplot as plt
-
-def visualize_query_partition(logits: torch.Tensor, h: int, w: int, query_id: int = None, temperature: float = 1.0 , savePath = None):
-    """
-    可视化 queries 对图像 patch 的分区效果
-
-    Args:
-        logits: [b, N, num_q] 其中 N = h * w
-        h, w: 图像patch网格大小
-        query_id: 可选，指定查看某个 query 的 soft mask
-        temperature: softmax 温度
-    """
-    b, N, num_q = logits.shape
-    assert N == h * w, f"输入的logits尺寸和h*w不一致: {N} vs {h*w}"
-    
-    # 只取 batch 内第一个样本
-    logits = logits[0]  # (N, num_q)
-
-    # softmax 概率
-    p = torch.softmax(logits / temperature, dim=-1)  # (N, num_q)
-
-    # 1. argmax 分区图
-    region_id = p.argmax(dim=-1).reshape(h, w).cpu().numpy()
-
-    # 2. confidence map
-    confidence = p.max(dim=-1).values.reshape(h, w).cpu().numpy()
-
-    fig, axs = plt.subplots(1, 2 + (1 if query_id is not None else 0), figsize=(12, 5))
-
-    # 左边：argmax 分区
-    axs[0].imshow(region_id, cmap="tab20")
-    axs[0].set_title("Query assignment (argmax)")
-    axs[0].axis("off")
-
-    # 中间：confidence map
-    im1 = axs[1].imshow(confidence, cmap="viridis")
-    axs[1].set_title("Assignment confidence")
-    axs[1].axis("off")
-    fig.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
-
-    # 右边：单个 query 的 soft mask
-    if query_id is not None:
-        mask_q = p[:, query_id].reshape(h, w).cpu().numpy()
-        im2 = axs[2].imshow(mask_q, cmap="viridis")
-        axs[2].set_title(f"Soft mask for query {query_id}")
-        axs[2].axis("off")
-        fig.colorbar(im2, ax=axs[2], fraction=0.046, pad=0.04)
-
-    plt.tight_layout()
-    if savePath is not None:
-        if not os.path.exists(savePath):
-            os.makedirs(savePath)
-        plt.savefig(os.path.join(savePath , f"query_partition_{time.time()}.png"))
-
-
-def fuse_bn(conv, bn):
-    conv_bias = 0 if conv.bias is None else conv.bias
-    std = (bn.running_var + bn.eps).sqrt()
-    return conv.weight * (bn.weight / std).reshape(-1, 1, 1, 1), bn.bias + (conv_bias - bn.running_mean) * bn.weight / std
-
-def get_bn(dim, use_sync_bn=False):
-    if use_sync_bn:
-        return nn.SyncBatchNorm(dim)
-    else:
-        return nn.BatchNorm2d(dim)
-
-def convert_dilated_to_nondilated(kernel, dilate_rate):
-    identity_kernel = torch.ones((1, 1, 1, 1)).to(kernel.device)
-    if kernel.size(1) == 1:
-        #   This is a DW kernel
-        dilated = F.conv_transpose2d(kernel, identity_kernel, stride=dilate_rate)
-        return dilated
-    else:
-        #   This is a dense or group-wise (but not DW) kernel
-        slices = []
-        for i in range(kernel.size(1)):
-            dilated = F.conv_transpose2d(kernel[:,i:i+1,:,:], identity_kernel, stride=dilate_rate)
-            slices.append(dilated)
-        return torch.cat(slices, dim=1)
-
-def merge_dilated_into_large_kernel(large_kernel, dilated_kernel, dilated_r):
-    large_k = large_kernel.size(2)
-    dilated_k = dilated_kernel.size(2)
-    equivalent_kernel_size = dilated_r * (dilated_k - 1) + 1
-    equivalent_kernel = convert_dilated_to_nondilated(dilated_kernel, dilated_r)
-    rows_to_pad = large_k // 2 - equivalent_kernel_size // 2
-    merged_kernel = large_kernel + F.pad(equivalent_kernel, [rows_to_pad] * 4)
-    return merged_kernel
-
-def get_conv2d(in_channels, 
-               out_channels, 
-               kernel_size, 
-               stride, 
-               padding, 
-               dilation, 
-               groups, 
-               bias,
-               attempt_use_lk_impl=True):
-    
-    kernel_size = to_2tuple(kernel_size)
-    if padding is None:
-        padding = (kernel_size[0] // 2, kernel_size[1] // 2)
-    else:
-        padding = to_2tuple(padding)
-    need_large_impl = kernel_size[0] == kernel_size[1] and kernel_size[0] > 5 and padding == (kernel_size[0] // 2, kernel_size[1] // 2)
-
-    if attempt_use_lk_impl and need_large_impl:
-        print('---------------- trying to import iGEMM implementation for large-kernel conv')
-        try:
-            from depthwise_conv2d_implicit_gemm import DepthWiseConv2dImplicitGEMM
-            print('---------------- found iGEMM implementation ')
-        except:
-            DepthWiseConv2dImplicitGEMM = None
-            print('---------------- found no iGEMM. use original conv. follow https://github.com/AILab-CVC/UniRepLKNet to install it.')
-        if DepthWiseConv2dImplicitGEMM is not None and need_large_impl and in_channels == out_channels \
-                and out_channels == groups and stride == 1 and dilation == 1:
-            print(f'===== iGEMM Efficient Conv Impl, channels {in_channels}, kernel size {kernel_size} =====')
-            return DepthWiseConv2dImplicitGEMM(in_channels, kernel_size, bias=bias)
-    
-    return nn.Conv2d(in_channels, out_channels, 
-                     kernel_size=kernel_size, 
-                     stride=stride,
-                     padding=padding, 
-                     dilation=dilation, 
-                     groups=groups, 
-                     bias=bias)
-    
-
-class DilatedReparamBlock(nn.Module):
-    """
-    Dilated Reparam Block proposed in UniRepLKNet (https://github.com/AILab-CVC/UniRepLKNet)
-    We assume the inputs to this block are (N, C, H, W)
-    """
-    def __init__(self, channels, kernel_size, deploy, use_sync_bn=False, attempt_use_lk_impl=True):
-        super().__init__()
-        self.lk_origin = get_conv2d(channels, channels, kernel_size, stride=1,
-                                    padding=kernel_size//2, dilation=1, groups=channels, bias=deploy,
-                                    attempt_use_lk_impl=attempt_use_lk_impl)
-        self.attempt_use_lk_impl = attempt_use_lk_impl
-
-        #   Default settings. We did not tune them carefully. Different settings may work better.
-        if kernel_size == 19:
-            self.kernel_sizes = [5, 7, 9, 9, 3, 3, 3]
-            self.dilates = [1, 1, 1, 2, 4, 5, 7]
-        elif kernel_size == 17:
-            self.kernel_sizes = [5, 7, 9, 3, 3, 3]
-            self.dilates = [1, 1, 2, 4, 5, 7]
-        elif kernel_size == 15:
-            self.kernel_sizes = [5, 7, 7, 3, 3, 3]
-            self.dilates = [1, 1, 2, 3, 5, 7]
-        elif kernel_size == 13:
-            self.kernel_sizes = [5, 7, 7, 3, 3, 3]
-            self.dilates = [1, 1, 2, 3, 4, 5]
-        elif kernel_size == 11:
-            self.kernel_sizes = [5, 7, 5, 3, 3, 3]
-            self.dilates = [1, 1, 2, 3, 4, 5]
-        elif kernel_size == 9:
-            self.kernel_sizes = [5, 7, 5, 3, 3]
-            self.dilates = [1, 1, 2, 3, 4]
-        elif kernel_size == 7:
-            self.kernel_sizes = [5, 3, 3, 3]
-            self.dilates = [1, 1, 2, 3]
-        elif kernel_size == 5:
-            self.kernel_sizes = [3, 3]
-            self.dilates = [1, 2]
-        else:
-            raise ValueError('Dilated Reparam Block requires kernel_size >= 5')
-
-        if not deploy:
-            self.origin_bn = get_bn(channels, use_sync_bn)
-            for k, r in zip(self.kernel_sizes, self.dilates):
-                self.__setattr__('dil_conv_k{}_{}'.format(k, r),
-                                 nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=k, stride=1,
-                                           padding=(r * (k - 1) + 1) // 2, dilation=r, groups=channels,
-                                           bias=False))
-                self.__setattr__('dil_bn_k{}_{}'.format(k, r), get_bn(channels, use_sync_bn=use_sync_bn))
-
-    def forward(self, x):
-        if not hasattr(self, 'origin_bn'): # deploy mode
-            return self.lk_origin(x)
-        out = self.origin_bn(self.lk_origin(x))
-        for k, r in zip(self.kernel_sizes, self.dilates):
-            conv = self.__getattr__('dil_conv_k{}_{}'.format(k, r))
-            bn = self.__getattr__('dil_bn_k{}_{}'.format(k, r))
-            out = out + bn(conv(x))
-        return out
-
-    def merge_dilated_branches(self):
-        if hasattr(self, 'origin_bn'):
-            origin_k, origin_b = fuse_bn(self.lk_origin, self.origin_bn)
-            for k, r in zip(self.kernel_sizes, self.dilates):
-                conv = self.__getattr__('dil_conv_k{}_{}'.format(k, r))
-                bn = self.__getattr__('dil_bn_k{}_{}'.format(k, r))
-                branch_k, branch_b = fuse_bn(conv, bn)
-                origin_k = merge_dilated_into_large_kernel(origin_k, branch_k, r)
-                origin_b += branch_b
-            merged_conv = get_conv2d(origin_k.size(0), origin_k.size(0), origin_k.size(2), stride=1,
-                                    padding=origin_k.size(2)//2, dilation=1, groups=origin_k.size(0), bias=True,
-                                    attempt_use_lk_impl=self.attempt_use_lk_impl)
-            merged_conv.weight.data = origin_k
-            merged_conv.bias.data = origin_b
-            self.lk_origin = merged_conv
-            self.__delattr__('origin_bn')
-            for k, r in zip(self.kernel_sizes, self.dilates):
-                self.__delattr__('dil_conv_k{}_{}'.format(k, r))
-                self.__delattr__('dil_bn_k{}_{}'.format(k, r))
-   
-
-class ResDWConv(nn.Conv2d):
-    '''
-    Depthwise convolution with residual connection
-    '''
-    def __init__(self, dim, kernel_size=3):
-        super().__init__(dim, dim, kernel_size=kernel_size, padding=kernel_size//2, groups=dim)
-    
-    def forward(self, x):
-        x = x + super().forward(x)
-        return x
-        
-class LayerNorm2d(nn.LayerNorm):
-    def __init__(self, dim):
-        super().__init__(normalized_shape=dim, eps=1e-6)
-    
-    def forward(self, x):
-        # print(x.shape)
-        x = rearrange(x, 'b c h w -> b h w c')
-        x = super().forward(x)
-        x = rearrange(x, 'b h w c -> b c h w')
-        return x.contiguous()
-
-class SEModule(nn.Module):
-    def __init__(self, dim, red=8, inner_act=nn.GELU, out_act=nn.Sigmoid):
-        super().__init__()
-        inner_dim = max(16, dim // red)
-        self.proj = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(dim, inner_dim, kernel_size=1),
-            inner_act(),
-            nn.Conv2d(inner_dim, dim, kernel_size=1),
-            out_act(),
-        )
-        
-    def forward(self, x):
-        x = x * self.proj(x)
-        return x
-
-
-
-class LayerScale(nn.Module):
-    def __init__(self, dim, init_value=1e-5):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim, 1, 1, 1)*init_value, 
-                                   requires_grad=True)
-        self.bias = nn.Parameter(torch.zeros(dim), requires_grad=True)
-
-    def forward(self, x):
-        x = F.conv2d(x, weight=self.weight, bias=self.bias, groups=x.shape[1])
-        return x
-
-class GRN(nn.Module):
-    """ GRN (Global Response Normalization) layer
-    Originally proposed in ConvNeXt V2 (https://arxiv.org/abs/2301.00808)
-    This implementation is more efficient than the original (https://github.com/facebookresearch/ConvNeXt-V2)
-    We assume the inputs to this layer are (N, C, H, W)
-    """
-    def __init__(self, dim, use_bias=True):
-        super().__init__()
-        self.use_bias = use_bias
-        self.gamma = nn.Parameter(torch.zeros(1, dim, 1, 1))
-        if self.use_bias:
-            self.beta = nn.Parameter(torch.zeros(1, dim, 1, 1))
-
-    def forward(self, x):
-        Gx = torch.norm(x, p=2, dim=(-1, -2), keepdim=True)
-        Nx = Gx / (Gx.mean(dim=1, keepdim=True) + 1e-6)
-        if self.use_bias:
-            return (self.gamma * Nx + 1) * x + self.beta
-        else:
-            return (self.gamma * Nx + 1) * x
-        
-
-class RepConvBlock(nn.Module):
-
-    def __init__(self, 
-                 dim=64,
-                 kernel_size=7,
-                 mlp_ratio=4,
-                 ls_init_value=None,
-                 res_scale=False,
-                 drop_path=0,
-                 num_heads = 4,
-                 norm_layer=LayerNorm2d,
-                 use_gemm=False,
-                 deploy=False,
-                 use_checkpoint=False):
-        super().__init__()
-        
-        self.res_scale = res_scale
-        self.use_checkpoint = use_checkpoint
-        
-        mlp_dim = int(dim*mlp_ratio)
-        
-        self.dwconv = ResDWConv(dim, kernel_size=3)
-    
-        self.proj = nn.Sequential(
-            norm_layer(dim),
-            DilatedReparamBlock(dim, kernel_size=kernel_size, deploy=deploy, use_sync_bn=False, attempt_use_lk_impl=use_gemm),
-            nn.BatchNorm2d(dim),
-            SEModule(dim),
-            nn.Conv2d(dim, mlp_dim, kernel_size=1),
-            nn.GELU(),
-            ResDWConv(mlp_dim, kernel_size=3),
-            GRN(mlp_dim),
-            nn.Conv2d(mlp_dim, dim, kernel_size=1),
-            DropPath(drop_path) if drop_path > 0 else nn.Identity(),
-        )
-        self.crossAttention = nn.MultiheadAttention(dim, num_heads,batch_first=True)
-        self.pre_layer_norm = nn.LayerNorm(dim, eps=1e-6)
-        self.final_layer_norm = nn.LayerNorm(dim, eps=1e-6)
-        self.ffn = FeedForwardNetwork(dim, mlp_dim,subconv=False)
-        
-        self.ls = LayerScale(dim, init_value=ls_init_value) if ls_init_value is not None else nn.Identity()
-        
-    def forward_features(self, x  , queries):
-        # x: b c h w 
-        # q : b n q
-        b , c , h , w = x.shape
-        # print(f"enter block , {x.shape}")
-        x = self.dwconv(x)
-        
-        if self.res_scale:
-            x = self.ls(x) + self.proj(x)
-        else:
-            drop_path = self.proj[-1]
-            x = x + drop_path(self.ls(self.proj[:-1](x)))
-
-        # b , h , w , c = x.shape
-        x = rearrange(x , "b  c  h  w -> b (h w) c")
-        queries = queries +  self.crossAttention(self.pre_layer_norm(queries) , x , x , need_weights = False)[0]
-        queries = queries + self.ffn(self.final_layer_norm(queries))
-        x = rearrange(x , "b (h w) c -> b c h w" ,h = h , w = w)
-        
-        return x , queries
-    
-    def forward(self, x , queries ):
-        
-        if self.use_checkpoint and x.requires_grad:
-            x , queries = checkpoint(self.forward_features, x, queries, use_reentrant=False)
-        else:
-            x , queries = self.forward_features(x , queries)
-        
-        return x , queries
-    
-    
-    
 
 class MaskScheduler:
+    """
+    动态调度 soft mask / gumbel-softmax / argmax 的分区mask
+    """
     def __init__(self, 
                  max_epoch: int,
                  tau_start: float = 2.0,
                  tau_end: float = 0.1,
-                 soft_phase: float = 0.3,
-                 gumbel_phase: float = 0.6,
-                 hard_phase: float = 0.1):
+                 soft_phase: float = 0.3,   # 前30% epoch
+                 gumbel_phase: float = 0.6, # 接下来的40%
+                 hard_phase: float = 0.1):  # 再接下来的10%，最后是argmax
         self.max_epoch = max_epoch
         self.tau_start = tau_start
         self.tau_end = tau_end
@@ -393,13 +39,16 @@ class MaskScheduler:
         self.hard_phase = hard_phase
 
     def get_tau(self, epoch: int):
+        """指数衰减温度"""
         ratio = epoch / self.max_epoch
-        return self.tau_start * (self.tau_end / self.tau_start) ** ratio
+        tau = self.tau_start * (self.tau_end / self.tau_start) ** ratio
+        return tau
 
     def __call__(self, logits: torch.Tensor, epoch: int):
         """
         logits: [B, N, num_q]
-        return: mask, is_soft
+        epoch: 当前训练的epoch
+        return: mask [B, N, N] (float类型，1允许，0禁止)
         """
         tau = self.get_tau(epoch)
         B, N, num_q = logits.shape
@@ -407,33 +56,28 @@ class MaskScheduler:
         phase1 = int(self.soft_phase * self.max_epoch)
         phase2 = phase1 + int(self.gumbel_phase * self.max_epoch)
         phase3 = phase2 + int(self.hard_phase * self.max_epoch)
-        
-        # region_id = logits.argmax(dim=-1)
-        # mask = (region_id.unsqueeze(-1) == region_id.unsqueeze(-2)).float()
-        # # print(f"mask shape is {mask.shape}")
-        # return mask , False
-    
+        #FIXME： 这种消耗显存实在是太多了！！！！！
         if epoch < phase1:
-            p = F.softmax(logits / tau, dim=-1)
-            # p : N q. : N 属于 q 的概率   ： (N q * q N )
-            mask = torch.einsum("bik,bjk->bij", p, p)  
-            return mask, True  # soft
+            # soft mask
+            p = F.softmax(logits / tau, dim=-1)       # [B, N, num_q]
+            mask = torch.einsum("bik,bjk->bij", p, p) # 内积
 
         elif epoch < phase2:
+            # gumbel-softmax soft
             p = F.gumbel_softmax(logits, tau=tau, hard=False, dim=-1)
             mask = torch.einsum("bik,bjk->bij", p, p)
-            return mask, True  # soft
 
         elif epoch < phase3:
+            # gumbel-softmax hard (前向one-hot，反向可微)
             p = F.gumbel_softmax(logits, tau=tau, hard=True, dim=-1)
             mask = torch.einsum("bik,bjk->bij", p, p)
-            return mask, False  # hard
 
         else:
-            # hw , q
-            region_id = logits.argmax(dim=-1)
+            # 最终 argmax
+            region_id = logits.argmax(dim=-1) # [B, N]
             mask = (region_id.unsqueeze(-1) == region_id.unsqueeze(-2)).float()
-            return mask, False  # hard
+
+        return mask
 
 # 现在打算的是 Q到像素 ， 像素到query ， query 到query 都是互相通的
 class MaskAttention(nn.Module):
@@ -460,7 +104,7 @@ class MaskAttention(nn.Module):
         nn.init.xavier_normal_(self.out_proj.weight)
         nn.init.constant_(self.out_proj.bias, 0.0)
 
-    def forward(self, x: torch.Tensor , mask , h , w  , isSoftMask = True):
+    def forward(self, x: torch.Tensor , mask , h , w):
         '''
         x: (b, n+h*w , c)
         '''
@@ -483,15 +127,9 @@ class MaskAttention(nn.Module):
         qk_mat = q_h @ k_h.transpose(-1, -2) #(b n l l)
         
         if mask is not None:
-            if isSoftMask:
-                # # 对应元素相乘
-                # mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # 形状变为 [b, h, n, n]
-                # qk_mat = qk_mat * mask  #(b n l l)
-                #对于soft mask来说，相乘太容易溢出了，而且原本的soft mask其实比较类似于一个相融的特征，而且mask为0时，log会很小，所以对应的qk_mat也会变小，其实更合理一些
-                
-                qk_mat = qk_mat + torch.log(mask.unsqueeze(1) + 1e-6)
-            else :
-                qk_mat = qk_mat.masked_fill(mask.unsqueeze(1) == 0, float("-inf"))
+            # FIXME : 确认是对应元素相乘
+            mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # 形状变为 [b, h, n, n]
+            qk_mat = qk_mat * mask  #(b n l l)
         
         qk_mat = torch.softmax(qk_mat, -1) #(b n l l)
         output = torch.matmul(qk_mat, v_h) #(b n l d2)
@@ -674,7 +312,6 @@ class RetBlock(nn.Module):
         self.ffn = FeedForwardNetwork(embed_dim, ffn_dim,subconv=False)
         self.pos = DWConv2d(embed_dim, 3, 1, 1)
         self.crossAttention = nn.MultiheadAttention(embed_dim, num_heads,batch_first=True)
-        
         if layerscale:
             self.gamma_1 = nn.Parameter(layer_init_values * torch.ones(1, 1, 1, embed_dim),requires_grad=True)
             self.gamma_2 = nn.Parameter(layer_init_values * torch.ones(1, 1, 1, embed_dim),requires_grad=True)
@@ -695,22 +332,19 @@ class RetBlock(nn.Module):
         else:
             x = x + self.drop_path(self.retention(self.retention_layer_norm(x), retention_rel_pos, chunkwise_recurrent, incremental_state))
             x = x + self.drop_path(self.ffn(self.final_layer_norm(x)))
-            
         b , h , w , c = x.shape
-        
         x = x.reshape( b , -1 ,c)
         queries = queries +  self.crossAttention(self.retention_layer_norm(queries) , x , x , need_weights = False)[0]
         queries = queries + self.ffn(self.final_layer_norm(queries))
         x = x.reshape( b , h , w, c)
         #在这里做cross attention 吧！随机初始化更好还是添加位置编码比较好？
         return x , queries
-
-
-def visualize(mask_logits , hw):
+    
+def visualize(mask_logits):
     with torch.no_grad():
         import matplotlib.pyplot as plt
         region_id = mask_logits.argmax(dim=-1)
-        region_map = region_id.reshape(hw,hw)
+        region_map = region_id.reshape(28,28)
         cmap = plt.cm.get_cmap('tab10', 8)
         plt.imshow(region_map, cmap=cmap)
 
@@ -727,7 +361,6 @@ class SegBlock(nn.Module):
         self.final_layer_norm = nn.LayerNorm(self.embed_dim, eps=1e-6)
         self.ffn = FeedForwardNetwork(embed_dim, ffn_dim,subconv=False)
         self.pos = DWConv2d(embed_dim, 3, 1, 1)
-        self.logit_temperature = nn.Parameter(torch.tensor(math.sqrt(embed_dim), dtype=torch.float32))
         #FIXME:
         self.mask_scheduler = MaskScheduler(max_epoch=200)
         if layerscale:
@@ -743,21 +376,23 @@ class SegBlock(nn.Module):
         ):
         b , h , w, c = x.shape
         _,num_q ,_ = queries.shape
+        
         x = x + self.pos(x)
         # b , N , c
         x = x.reshape(b,-1,c)
         x_with_q = torch.cat((queries , x) , dim=1)
+        # now generate mask
+
         
-        mask_logits = F.normalize(x , dim=-1) @ F.normalize(queries,dim=-1).transpose(-1, -2)
-        mask_logits = mask_logits * self.logit_temperature.float()
-        # mask_logits =  F.normalize(x) @ F.normalize(queries.transpose(-1, -2)) # b , N ,numq
-        # mask_logits =  F.normalize(x , dim = -1) @ F.normalize(queries , dim=-1).transpose(-1,-2) # b , N ,numq
-        # mask_logits =  x @ queries.transpose(-1,-2) # b , N ,numq
+        #FIXME: 使用了full 
+        mask_logits =  x @ queries.transpose(-1, -2) # b , N ,numq
         
+        # region_id = mask_logits.argmax(dim=-1)
         mask = torch.ones(b,num_q+h*w , num_q+h*w,dtype=x_with_q.dtype,device=x_with_q.device)
-        imgMask , isSoft  = self.mask_scheduler(mask_logits, epoch)
-        mask[:,num_q:,num_q:] = imgMask
-        
+        # B, N , N 
+
+        # mask[:,num_q:,num_q:] = region_id.unsqueeze(-1) == region_id.unsqueeze(-2) 
+        mask[:,num_q:,num_q:]  = self.mask_scheduler(mask_logits, epoch)
         
         
         # #FIXME: 
@@ -767,16 +402,15 @@ class SegBlock(nn.Module):
         # mask[:,num_q:,num_q:] = region_id.unsqueeze(-1) == region_id.unsqueeze(-2)
         
         if self.layerscale:
-            x_with_q = x_with_q + self.drop_path(self.gamma_1 * self.mask_attention(self.retention_layer_norm(x_with_q), mask , h ,w , isSoft))
+            x_with_q = x_with_q + self.drop_path(self.gamma_1 * self.mask_attention(self.retention_layer_norm(x_with_q), mask , h ,w))
             x_with_q = x_with_q + self.drop_path(self.gamma_2 * self.ffn(self.final_layer_norm(x_with_q)))
         else:
-            x_with_q = x_with_q + self.drop_path(self.mask_attention(self.retention_layer_norm(x_with_q) , mask , h , w , isSoft))
+            x_with_q = x_with_q + self.drop_path(self.mask_attention(self.retention_layer_norm(x_with_q) , mask , h , w))
             x_with_q = x_with_q + self.drop_path(self.ffn(self.final_layer_norm(x_with_q)))
 
         x = x_with_q[:,num_q:,:].reshape(b,h,w,c)
         queries = x_with_q[:,:num_q,:]
         return x , queries 
-    
 class SegLayer(nn.Module):
     def __init__(self, embed_dim, out_dim, depth, num_heads,
                  ffn_dim=96., drop_path=0., norm_layer=nn.LayerNorm, 
@@ -805,14 +439,14 @@ class SegLayer(nn.Module):
     def forward(self, x , queries , epoch):
         b, h, w, d = x.size()
         b,n,d = queries.size()
+    
         
-        for index , blk in enumerate(self.blocks):
+        for blk in self.blocks:
             x  , queries= blk(x , queries , epoch)
                 
         if self.downsample is not None:
             x = self.downsample(x)
             queries = self.queriesLinear(queries)
-
         return x , queries
     
 class BasicLayer(nn.Module):
@@ -886,52 +520,6 @@ class BasicLayer(nn.Module):
             
         return x , queries
 
-class ConvLayer(nn.Module):
-    def __init__(self, embed_dim, out_dim, depth,kernel_size,
-                 ls_init_value: float, res_scale: float,num_heads = 4,
-                 mlp_ratio=4, dpr=0., norm_layer=nn.LayerNorm, use_gemm=False,
-                 deploy = False, use_checkpoint=False , downsample: PatchMerging=None):
-        super().__init__()
-        self.blocks = nn.ModuleList()
-        for i in range(depth):
-            self.blocks.append(
-                RepConvBlock(
-                    dim=embed_dim,
-                    kernel_size=kernel_size,
-                    mlp_ratio=mlp_ratio,
-                    num_heads=num_heads,
-                    ls_init_value=ls_init_value,
-                    res_scale=res_scale,
-                    norm_layer=LayerNorm2d,
-                    drop_path=dpr[i],
-                    use_gemm=use_gemm,
-                    deploy=deploy,
-                    use_checkpoint=use_checkpoint,
-                )
-        )
-            
-        if downsample is not None:
-            self.downsample = downsample(dim=embed_dim, out_dim=out_dim, norm_layer=norm_layer)
-            self.queriesLinear = nn.Linear(embed_dim , out_dim)
-        else:
-            self.downsample = None
-            self.queriesLinear = None
-    
-    def forward(self,  x , queries):
-        b, c  , h , w = x.size()
-        b,n,d = queries.size()
-        
-        for blk in self.blocks:
-            x , queries= blk(x , queries)
-        
-        x = x.permute(0,2,3,1)   
-        
-        if self.downsample is not None:
-            x = self.downsample(x)
-            queries = self.queriesLinear(queries)
-        
-            
-        return x , queries
 
 class VisSegNet(nn.Module):
 
@@ -964,34 +552,22 @@ class VisSegNet(nn.Module):
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
             if i_layer == 0:  
-                #好大的核
-                layer = ConvLayer(embed_dim= embed_dims[i_layer],
-                                  out_dim=embed_dims[i_layer+1],
-                                  depth=depths[i_layer],
-                                  kernel_size = 17,
-                                  ls_init_value = None,
-                                  res_scale = True,
-                                  num_heads=num_heads[i_layer],
-                                  mlp_ratio=mlp_ratios[i_layer],
-                                  dpr=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
-                                  downsample=PatchMerging,
-                                  )
-                # layer = BasicLayer(
-                #     embed_dim=embed_dims[i_layer],
-                #     out_dim=embed_dims[i_layer+1] if (i_layer < self.num_layers - 1) else None,
-                #     depth=depths[i_layer],
-                #     num_heads=num_heads[i_layer],
-                #     init_value=init_values[i_layer],
-                #     heads_range=heads_ranges[i_layer],
-                #     ffn_dim=int(mlp_ratios[i_layer]*embed_dims[i_layer]),
-                #     drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
-                #     norm_layer=norm_layer,
-                #     chunkwise_recurrent=chunkwise_recurrents[i_layer],
-                #     downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
-                #     use_checkpoint=use_checkpoints[i_layer],
-                #     layerscale=layerscales[i_layer],
-                #     layer_init_values=layer_init_values
-                # )
+                layer = BasicLayer(
+                    embed_dim=embed_dims[i_layer],
+                    out_dim=embed_dims[i_layer+1] if (i_layer < self.num_layers - 1) else None,
+                    depth=depths[i_layer],
+                    num_heads=num_heads[i_layer],
+                    init_value=init_values[i_layer],
+                    heads_range=heads_ranges[i_layer],
+                    ffn_dim=int(mlp_ratios[i_layer]*embed_dims[i_layer]),
+                    drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                    norm_layer=norm_layer,
+                    chunkwise_recurrent=chunkwise_recurrents[i_layer],
+                    downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
+                    use_checkpoint=use_checkpoints[i_layer],
+                    layerscale=layerscales[i_layer],
+                    layer_init_values=layer_init_values
+                )
             else:
                 layer = SegLayer(
                     embed_dim=embed_dims[i_layer],
@@ -1038,24 +614,21 @@ class VisSegNet(nn.Module):
     def forward_features(self, x , epoch):
         b , c , h , w = x.shape
         num_q = 8
-        # queries = torch.randn(b,num_q , self.embed_dim)
-        # queries = queries / queries.norm(dim=-1, keepdim=True)
+        queries = torch.randn(b,num_q , self.embed_dim)
+        queries = queries / queries.norm(dim=-1, keepdim=True)
         
-        #  输出 b c , h ,w
+        #  b c , h ,w
         x = self.patch_embed(x)
         #FIXME : N , C -> B , N , C
         # queries = self.q.weight[None , :].expand(x.shape[0] , -1,-1)
-        queries = self.q.expand(b , -1, -1)
+        queries = self.q.expand(b , -1,-1)
         
         firstlayer = self.layers[0]
-        
-        
         
         # 在这个layer内部，每个block都会做一次corss attention
 
         x  , queries = firstlayer(x ,queries)
         
-        # x = rearrange(x , "b c h w -> b h w c")
         for layer in self.layers[1:]:
             x , queries = layer(x , queries , epoch)
 
@@ -1067,7 +640,7 @@ class VisSegNet(nn.Module):
         x = torch.flatten(x, 1)
         return x
 
-    def forward(self, x ,epoch=200):
+    def forward(self, x ,epoch):
         x = self.forward_features(x , epoch)
         x = self.head(x)
         return x
@@ -1075,9 +648,8 @@ class VisSegNet(nn.Module):
 
 
 @register_model
-def VisSegNet_conv_S(args):
+def VisSegNet_argmax_S(args):
     model = VisSegNet(
-        num_classes= args.nb_classes,
         embed_dims=[64, 128, 256, 512],
         depths=[3, 4, 18, 4],
         num_heads=[4, 4, 8, 16],
@@ -1085,23 +657,6 @@ def VisSegNet_conv_S(args):
         heads_ranges=[4, 4, 6, 6],
         mlp_ratios=[4, 4, 3, 3],
         drop_path_rate=0.15,
-        chunkwise_recurrents=[True, True, True, False],
-        layerscales=[False, False, False, False]
-    )
-    model.default_cfg = _cfg()
-    return model
-
-@register_model
-def VisSegNet_conv_T(args):
-    model = VisSegNet(
-        num_classes= args.nb_classes,
-        embed_dims=[64, 128, 256, 512],
-        depths=[2,2,8,2],
-        num_heads=[4, 4, 8, 16],
-        init_values=[2, 2, 2, 2],
-        heads_ranges=[4, 4, 6, 6],
-        mlp_ratios=[3, 3, 3, 3],
-        drop_path_rate=0.1,
         chunkwise_recurrents=[True, True, True, False],
         layerscales=[False, False, False, False]
     )

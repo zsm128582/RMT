@@ -1,6 +1,7 @@
 from SegNet.segmentBackbone import VisSegNet_S
+from SegNet_argmax.segmentBackbone import VisSegNet_argmax_S
 from SegNet_conv.segmentBackbone import VisSegNet_conv_T
-from Qnet.segmentBackbone import Qnet_T
+from RMT import RMT_T3
 import torch
 import cv2
 from PIL import Image
@@ -234,8 +235,8 @@ features = None
 gradients = None
 def forward_hook (module , input , output):
     global features
-    x, _ = output
-    features = x
+    features = output
+    print(features.shape)
 
 def backward_hook(module, grad_input, grad_output):
     """
@@ -246,127 +247,79 @@ def backward_hook(module, grad_input, grad_output):
     if isinstance(grad_output, tuple):
         # grad_output 可能是 (grad_x, grad_queries) 或者只有一个
         grad_x = grad_output[0]
-        grad_q = grad_output[1]
-        print("gradient of q")
-        print(grad_q)
+
     else:
         grad_x = grad_output
     gradients = grad_x
 
+# if __name__ == '__main__':
+#     parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
+#     args = parser.parse_args()
+#     args.nb_classes = 1000
+#     resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/firstTest/checkpoint.pth"
+#     checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
+#     model = VisSegNet_S(args)
+
+#     # resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/gumbel-softmax/best.pth"
+#     # checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
+#     # model = VisSegNet_S(None)
+    
+#     # feature_maps = None 
+#     # queries = None
+#     # def hook_fn(module , input , output):
+#     #     global feature_maps
+#     #     feature_maps , queries = output
+        
+        
+#     # target_layer = dict(model.named_modules())["layers.0"]
+#     # hook = target_layer.register_forward_hook(hook_fn)
+
+
+#     model.load_state_dict(checkpoint['model'], strict=False)
+#     model.eval()
+
+#     #归一化
+#     transform = build_transform(False, args)
+#     root = "/home/zengshimao/datasets/ImageNet1k/val/"
+#     dataset = datasets.ImageFolder(root, transform=transform)
+#     testImage , target = dataset.__getitem__(0)
+#     testImage = torch.unsqueeze(testImage, 0)
+#     with torch.no_grad():
+#         res = model(testImage,200)
+#     # hook.remove()
+#     print(res)
+
+#     # visualize_feature_maps(feature_maps)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
-    resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/QNet/best.pth"
+    resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/firstTest/checkpoint.pth"
     checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
     args.nb_classes = 1000
-    model = Qnet_T(args)
-
-    target_layer = model.layers[3]
-    target_layer.register_forward_hook(forward_hook)
-    target_layer.register_full_backward_hook(backward_hook)
-
-    
+    model = VisSegNet_argmax_S(args)
     model.load_state_dict(checkpoint['model'], strict=False)
     model.eval()
 
-
-    #归一化
-    transform = build_transform(False, args)
-    root = "/home/zengshimao/datasets/ImageNet1k/val/"
-    # dataset = datasets.ImageFolder(root, transform=transform)
-    # testImage , target = dataset.__getitem__(0)
-
-    # testImage = torch.unsqueeze(testImage, 0)
-    preprocess = transforms.Compose([
-    transforms.Resize((224,224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                         std=[0.229, 0.224, 0.225])
-    ])
-
-    def grad_cam(imagepath , savepath):
-        img = Image.open(imagepath).convert("RGB")
-        input_tensor = preprocess(img).unsqueeze(0)
+    # preprocess = transforms.Compose([
+    # transforms.Resize((224,224)),
+    # transforms.ToTensor(),
+    # transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+    #                      std=[0.229, 0.224, 0.225])
+    # ])
+    preprocess = build_transform(False, args)
 
 
-        res = model(input_tensor,200)
-        pred_class = res.argmax(dim = -1)
-
-        model.zero_grad()
-        res[0,pred_class].backward()
-        global gradients
-        global features
-
-        gradients = gradients.permute(0,3,1,2)
-        features = features.permute(0,3,1,2)
-
-        weights = gradients.mean(dim=[2, 3], keepdim=True)  
-        cam = (weights * features).sum(dim=1, keepdim=True)
+    #小狗：/home/zengshimao/datasets/ImageNet1k/val/n02113712/n02113712_43516.JPEG
+    # 狗2 ：/home/zengshimao/datasets/ImageNet1k/val/n02113712/n02113712_10575.JPEG
+    #鱼：/home/zengshimao/datasets/ImageNet1k/val/n01440764/n01440764_2138.JPEG
+    img = Image.open("/home/zengshimao/datasets/ImageNet1k/val/n01440764/n01440764_10306.JPEG").convert("RGB")
+    input_tensor = preprocess(img).unsqueeze(0)
 
 
-        cam = torch.relu(cam)
-        cam = torch.nn.functional.interpolate(
-            cam, size=(224,224), mode='bilinear', align_corners=False)
-        
-        cam = cam.squeeze().detach().numpy()
+    res = model(input_tensor,200)
+    pred_class = res.argmax(dim = -1)
 
-        cam = (cam - cam.min()) / (cam.max() - cam.min())
-        heatmap = plt.cm.jet(cam)[..., :3]
-        overlay = 0.5*heatmap + 0.5*np.array(img.resize((224,224)))/255
-        print(overlay.shape)
-        plt.imshow(overlay)
-        plt.axis("off")
-        plt.savefig(savepath)
-    
-    # imagepaths = [
-    #     "/home/zengshimao/datasets/ImageNet1k/val/n02113712/n02113712_43516.JPEG",
-    #     "/home/zengshimao/datasets/ImageNet1k/val/n02113712/n02113712_10575.JPEG",
-    #     "/home/zengshimao/datasets/ImageNet1k/val/n01440764/n01440764_2138.JPEG"
-    # ]
-    # for index , path in enumerate(imagepaths):
-    #     grad_cam(path , f"/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/QNet/grad_cam_{index}.png")
-    grad_cam("/home/zengshimao/datasets/ImageNet1k/val/n01440764/n01440764_10306.JPEG" , "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/QNet/grad_cam.png")
-
-    # resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/gumbel-softmax/best.pth"
-    # checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
-    # model = VisSegNet_S(None)
-    
-
-
-
-    # feature_maps = None 
-    # queries = None
-    # def hook_fn(module , input , output):
-    #     global feature_maps
-    #     feature_maps , queries = output
-        
-        
-    # target_layer = dict(model.named_modules())["layers.0"]
-    # hook = target_layer.register_forward_hook(hook_fn)
-
-
-
-
-    # model.load_state_dict(checkpoint['model'], strict=False)
-    # model.eval()
-
-
-
-    # #归一化
-    # transform = build_transform(False, args)
-    # root = "/home/zengshimao/datasets/ImageNet1k/val/"
-    # dataset = datasets.ImageFolder(root, transform=transform)
-    # testImage , target = dataset.__getitem__(0)
-    # testImage = torch.unsqueeze(testImage, 0)
-    # with torch.no_grad():
-    #     res = model(testImage,200)
-    # hook.remove()
-    # print(res)
-
-    # visualize_feature_maps(feature_maps)
-
-
-    
 
 """"
 可视化方法：

@@ -234,48 +234,31 @@ def visualize_feature_maps(feature_maps):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
-    resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/conv/best.pth"
+    resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/conv/checkpoint.pth"
     checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
-    model = VisSegNet_conv_T(None)
-
-    # resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/gumbel-softmax/best.pth"
-    # checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
-    # model = VisSegNet_S(None)
-    
-
-
-
-    feature_maps = None 
-    queries = None
-    def hook_fn(module , input , output):
-        global feature_maps
-        feature_maps , queries = output
-        
-        
-    target_layer = dict(model.named_modules())["layers.0"]
-    hook = target_layer.register_forward_hook(hook_fn)
-
-
-
-
+    args.nb_classes = 1000
+    model = VisSegNet_conv_T(args)
     model.load_state_dict(checkpoint['model'], strict=False)
     model.eval()
 
+    # preprocess = transforms.Compose([
+    # transforms.Resize((224,224)),
+    # transforms.ToTensor(),
+    # transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+    #                      std=[0.229, 0.224, 0.225])
+    # ])
+    preprocess = build_transform(False, args)
 
 
-    #归一化
-    transform = build_transform(False, args)
-    root = "/home/zengshimao/datasets/ImageNet1k/val/"
-    dataset = datasets.ImageFolder(root, transform=transform)
-    testImage , target = dataset.__getitem__(0)
-    testImage = torch.unsqueeze(testImage, 0)
-    with torch.no_grad():
-        res = model(testImage,200)
-    hook.remove()
-    print(res)
+    # 小狗：/home/zengshimao/datasets/ImageNet1k/val/n02113712/n02113712_43516.JPEG
+    # 狗2 ：/home/zengshimao/datasets/ImageNet1k/val/n02113712/n02113712_10575.JPEG
+    # 鱼：/home/zengshimao/datasets/ImageNet1k/val/n01440764/n01440764_2138.JPEG
+    img = Image.open("/home/zengshimao/datasets/ImageNet1k/val/n01440764/n01440764_10306.JPEG").convert("RGB")
+    input_tensor = preprocess(img).unsqueeze(0)
 
-    visualize_feature_maps(feature_maps)
-    
+
+    res = model(input_tensor,200)
+    pred_class = res.argmax(dim = -1)
 
 """"
 可视化方法：

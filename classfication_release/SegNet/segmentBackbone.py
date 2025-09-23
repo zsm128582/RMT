@@ -397,6 +397,13 @@ class RetBlock(nn.Module):
         x = x.reshape( b , h , w, c)
         #在这里做cross attention 吧！随机初始化更好还是添加位置编码比较好？
         return x , queries
+def visualize(mask_logits):
+    with torch.no_grad():
+        import matplotlib.pyplot as plt
+        region_id = mask_logits.argmax(dim=-1)
+        region_map = region_id.reshape(28,28)
+        cmap = plt.cm.get_cmap('tab10', 8)
+        plt.imshow(region_map, cmap=cmap)
 
 class SegBlock(nn.Module):
 
@@ -431,7 +438,7 @@ class SegBlock(nn.Module):
         # b , N , c
         x = x.reshape(b,-1,c)
         x_with_q = torch.cat((queries , x) , dim=1)
-    
+
         # mask_logits =  F.normalize(x) @ F.normalize(queries.transpose(-1, -2)) # b , N ,numq
         mask_logits = F.normalize(x , dim=-1) @ F.normalize(queries,dim=-1).transpose(-1, -2)
         # mask_logits = x @ queries.transpose(-1,-2)

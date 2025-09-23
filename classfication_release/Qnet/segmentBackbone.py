@@ -416,23 +416,19 @@ class MaskAttention(nn.Module):
         k = self.k_proj(x)
         v = self.v_proj(x)
         # b h w c
-        lepe = self.lepe(v[:,queriesNum :].reshape(bsz , h , w , -1)).reshape(bsz , h*w , -1)
+        lepe = self.lepe(v[:,queriesNum:].reshape(bsz , h , w , -1)).reshape(bsz , h*w , -1)
 
         k *= self.scaling
 
         q_h = q.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
         k_h = k.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
-        v_h = k.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
+        #WTF???????
+        v_h = k.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3) 
         
         qk_mat = q_h @ k_h.transpose(-1, -2) #(b n l l)
         
         if mask is not None:
             if isSoftMask:
-                # # 对应元素相乘
-                # mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # 形状变为 [b, h, n, n]
-                # qk_mat = qk_mat * mask  #(b n l l)
-                #对于soft mask来说，相乘太容易溢出了，而且原本的soft mask其实比较类似于一个相融的特征，而且mask为0时，log会很小，所以对应的qk_mat也会变小，其实更合理一些
-                
                 qk_mat = qk_mat + torch.log(mask.unsqueeze(1) + 1e-6)
             else :
                 qk_mat = qk_mat.masked_fill(mask.unsqueeze(1) == 0, float("-inf"))
@@ -683,25 +679,6 @@ class SegBlock(nn.Module):
         x = x.reshape(b,-1,c)
         x_with_q = torch.cat((queries , x) , dim=1)
         
-        #FIXME : 完了，F.normalize的默认归一化维度是1，所以现在感觉很奇怪,
-        # mask_logits = F.normalize(x , dim=-1) @ F.normalize(queries,dim=-1).transpose(-1, -2)
-        # mask_logits = mask_logits * self.logit_temperature.float()
-        # mask_logits =  F.normalize(x) @ F.normalize(queries.transpose(-1, -2)) # b , N ,numq
-        # mask_logits =  F.normalize(x , dim = -1) @ F.normalize(queries , dim=-1).transpose(-1,-2) # b , N ,numq
-        # mask_logits =  x @ queries.transpose(-1,-2) # b , N ,numq
-        
-        # mask = torch.ones(b,num_q+h*w , num_q+h*w,dtype=x_with_q.dtype,device=x_with_q.device)
-        # imgMask , isSoft  = self.mask_scheduler(mask_logits, epoch)
-        # mask[:,num_q:,num_q:] = imgMask
-        
-        
-        
-        # #FIXME: 
-        # mask_logist = x @ queries.transpose(-1, -2) # b , N ,numq 
-        # region_id = mask_logist .argmax(dim=-1) 
-        # mask = torch.ones(b,num_q+h*w , num_q+h*w,dtype=x_with_q.dtype,device=x_with_q.device) # B, N , N 
-        # mask[:,num_q:,num_q:] = region_id.unsqueeze(-1) == region_id.unsqueeze(-2)
-        
         if self.layerscale:
             x_with_q = x_with_q + self.drop_path(self.gamma_1 * self.mask_attention(self.retention_layer_norm(x_with_q), None , h ,w , False))
             x_with_q = x_with_q + self.drop_path(self.gamma_2 * self.ffn(self.final_layer_norm(x_with_q)))
@@ -748,6 +725,8 @@ class SegLayer(nn.Module):
         if self.downsample is not None:
             x = self.downsample(x)
             queries = self.queriesLinear(queries)
+        # print("x.requires_grad:", x.requires_grad)
+        # print("queries.requires_grad:", queries.requires_grad)
         return x , queries
     
 class BasicLayer(nn.Module):
