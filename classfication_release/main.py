@@ -33,8 +33,12 @@ from RMT import RMT_T3, RMT_S, RMT_M2, RMT_L6
 # from HalfRestore import HalfRestomer_defalt
 # from Biformer.Biformer import biformer_base
 from SegNet.segmentBackbone import VisSegNet_S
+from SegNet_argmax.segmentBackbone import VisSegNet_argmax_T
 from SegNet_conv.segmentBackbone import VisSegNet_conv_T
 from Qnet.segmentBackbone import Qnet_T
+from SegNet_conv_fixAttention.segmentBackbone import     VisSegNet_conv_fixAtten_T
+from SegNet_conv_fixDwconv.segmentBackbone import VisSegNet_conv_fixDwconv_T
+
 archs = {
             'RMT_T': RMT_T3,
             'RMT_S': RMT_S,
@@ -44,7 +48,10 @@ archs = {
             # "Biformer" : biformer_base,
             'SegNet' : VisSegNet_S,
             'VisSegNet_conv_T' : VisSegNet_conv_T,
-            'Qnet_T' : Qnet_T
+            'Qnet_T' : Qnet_T,
+            'VisSegNet_conv_fixAtten_T' : VisSegNet_conv_fixAtten_T,
+            'VisSegNet_conv_fixDwconv_T' : VisSegNet_conv_fixDwconv_T,
+            'VisSegNet_argmax_T':VisSegNet_argmax_T
             # 'Restormer' : Restormer_default,
             # 'Utentive' : Utentive_default,
             # 'Half' : HalfRestomer_defalt
@@ -52,7 +59,9 @@ archs = {
 
 use_gumbel_softmax = [
     'SegNet',
-    'VisSegNet_conv_T'
+    'VisSegNet_conv_T',
+    'VisSegNet_conv_fixAtten_T',
+    'VisSegNet_conv_fixDwconv_T'
 ]
 
 
@@ -327,7 +336,7 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)

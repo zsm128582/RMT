@@ -56,7 +56,6 @@ class MaskScheduler:
         phase1 = int(self.soft_phase * self.max_epoch)
         phase2 = phase1 + int(self.gumbel_phase * self.max_epoch)
         phase3 = phase2 + int(self.hard_phase * self.max_epoch)
-        #FIXME： 这种消耗显存实在是太多了！！！！！
         if epoch < phase1:
             # soft mask
             p = F.softmax(logits / tau, dim=-1)       # [B, N, num_q]
@@ -122,6 +121,7 @@ class MaskAttention(nn.Module):
 
         q_h = q.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
         k_h = k.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
+        #FIXME:
         v_h = k.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
         
         qk_mat = q_h @ k_h.transpose(-1, -2) #(b n l l)
@@ -340,13 +340,22 @@ class RetBlock(nn.Module):
         #在这里做cross attention 吧！随机初始化更好还是添加位置编码比较好？
         return x , queries
     
-def visualize(mask_logits):
+def visualize(mask_logits , hw):
     with torch.no_grad():
         import matplotlib.pyplot as plt
         region_id = mask_logits.argmax(dim=-1)
-        region_map = region_id.reshape(28,28)
+        region_map = region_id.reshape(hw,hw)
         cmap = plt.cm.get_cmap('tab10', 8)
         plt.imshow(region_map, cmap=cmap)
+
+def similarity(queries):
+    fm = queries @ queries.transpose(-1 , -2)
+    fm = fm[0]
+    fm.fill_diagonal_(0)
+    return fm.mean()
+
+def classCounter(mask_logits):
+    return  torch.bincount( mask_logits.argmax(dim=-1)[0], minlength=8)
 
 class SegBlock(nn.Module):
 
@@ -355,7 +364,7 @@ class SegBlock(nn.Module):
         self.layerscale = layerscale
         self.embed_dim = embed_dim
         self.retention_layer_norm = nn.LayerNorm(self.embed_dim, eps=1e-6)
-        self.queriesNorm = nn.LayerNorm(self.embed_dim, eps=1e-6)
+        # self.queriesNorm = nn.LayerNorm(self.embed_dim, eps=1e-6)
         self.mask_attention = MaskAttention(embed_dim, num_heads)
         self.drop_path = DropPath(drop_path)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim, eps=1e-6)
@@ -640,11 +649,27 @@ class VisSegNet(nn.Module):
         x = torch.flatten(x, 1)
         return x
 
-    def forward(self, x ,epoch):
+    def forward(self, x ,epoch=200):
         x = self.forward_features(x , epoch)
         x = self.head(x)
         return x
 
+@register_model
+def VisSegNet_argmax_T(args):
+    model = VisSegNet(
+        num_classes= args.nb_classes,
+        embed_dims=[64, 128, 256, 512],
+        depths=[2, 2,8,2],
+        num_heads=[4, 4, 8, 16],
+        init_values=[2, 2, 2, 2],
+        heads_ranges=[4, 4, 6, 6],
+        mlp_ratios=[3, 3, 3, 3],
+        drop_path_rate=0.1,
+        chunkwise_recurrents=[True, True, True, False],
+        layerscales=[False, False, False, False]
+    )
+    model.default_cfg = _cfg()
+    return model
 
 
 @register_model

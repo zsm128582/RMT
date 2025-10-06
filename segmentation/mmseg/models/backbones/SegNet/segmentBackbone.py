@@ -127,6 +127,7 @@ class MaskAttention(nn.Module):
 
         q_h = q.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
         k_h = k.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
+        #FIXME:
         v_h = k.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
         
         qk_mat = q_h @ k_h.transpose(-1, -2) #(b n l l)

@@ -407,11 +407,6 @@ class MaskScheduler:
         phase1 = int(self.soft_phase * self.max_epoch)
         phase2 = phase1 + int(self.gumbel_phase * self.max_epoch)
         phase3 = phase2 + int(self.hard_phase * self.max_epoch)
-        
-        # region_id = logits.argmax(dim=-1)
-        # mask = (region_id.unsqueeze(-1) == region_id.unsqueeze(-2)).float()
-        # # print(f"mask shape is {mask.shape}")
-        # return mask , False
     
         if epoch < phase1:
             p = F.softmax(logits / tau, dim=-1)
@@ -478,6 +473,7 @@ class MaskAttention(nn.Module):
 
         q_h = q.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
         k_h = k.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
+        #FIXME:
         v_h = k.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
         
         qk_mat = q_h @ k_h.transpose(-1, -2) #(b n l l)
@@ -721,7 +717,8 @@ class SegBlock(nn.Module):
         self.layerscale = layerscale
         self.embed_dim = embed_dim
         self.retention_layer_norm = nn.LayerNorm(self.embed_dim, eps=1e-6)
-        self.queriesNorm = nn.LayerNorm(self.embed_dim, eps=1e-6)
+        #没有用到
+        # self.queriesNorm = nn.LayerNorm(self.embed_dim, eps=1e-6)
         self.mask_attention = MaskAttention(embed_dim, num_heads)
         self.drop_path = DropPath(drop_path)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim, eps=1e-6)
@@ -749,6 +746,7 @@ class SegBlock(nn.Module):
         x_with_q = torch.cat((queries , x) , dim=1)
         
         mask_logits = F.normalize(x , dim=-1) @ F.normalize(queries,dim=-1).transpose(-1, -2)
+        # 在最后一个阶段中，这个logit temperature收不到梯度。
         mask_logits = mask_logits * self.logit_temperature.float()
         # mask_logits =  F.normalize(x) @ F.normalize(queries.transpose(-1, -2)) # b , N ,numq
         # mask_logits =  F.normalize(x , dim = -1) @ F.normalize(queries , dim=-1).transpose(-1,-2) # b , N ,numq

@@ -251,82 +251,88 @@ def backward_hook(module, grad_input, grad_output):
     else:
         grad_x = grad_output
     gradients = grad_x
+import matplotlib.pyplot as plt
 
-# if __name__ == '__main__':
-#     parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
-#     args = parser.parse_args()
-#     args.nb_classes = 1000
-#     resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/firstTest/checkpoint.pth"
-#     checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
-#     model = VisSegNet_S(args)
+def get_hook(path):
+    def visualHook(module , input , output):
+        x, queries , epoch = input
+        with torch.no_grad():
+            b , h , w, c = x.shape
+            x = x + module.pos(x)
+            x = x.reshape(b,-1,c)
+            mask_logits =  x @ queries.transpose(-1, -2) # b , N ,numq
+            # print(mask_logits.shape)
+            b , n , q = mask_logits.shape
+            region_id = mask_logits.argmax(dim=-1)
+            region_map = region_id.reshape(h,w)
+            cmap = plt.cm.get_cmap('tab10', 8)
+            plt.imsave(path,region_map, cmap=cmap)
+    return visualHook
 
-#     # resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/gumbel-softmax/best.pth"
-#     # checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
-#     # model = VisSegNet_S(None)
-    
-#     # feature_maps = None 
-#     # queries = None
-#     # def hook_fn(module , input , output):
-#     #     global feature_maps
-#     #     feature_maps , queries = output
-        
-        
-#     # target_layer = dict(model.named_modules())["layers.0"]
-#     # hook = target_layer.register_forward_hook(hook_fn)
+import torch.nn.functional as F
+def get_norm_hook(path):
+    def visualHook(module , input , output):
+        x, queries , epoch = input
+        with torch.no_grad():
+            b , h , w, c = x.shape
+            x = x + module.pos(x)
+            x = x.reshape(b,-1,c)
+            mask_logits = F.normalize(x , dim=-1) @ F.normalize(queries,dim=-1).transpose(-1, -2)
+            mask_logits = mask_logits * module.logit_temperature.float()
+            # print(mask_logits.shape)
+            b , n , q = mask_logits.shape
+            region_id = mask_logits.argmax(dim=-1)
+            region_map = region_id.reshape(h,w)
+            cmap = plt.cm.get_cmap('tab10', 8)
+            plt.imsave(path,region_map, cmap=cmap)
+    return visualHook
 
-
-#     model.load_state_dict(checkpoint['model'], strict=False)
-#     model.eval()
-
-#     #归一化
-#     transform = build_transform(False, args)
-#     root = "/home/zengshimao/datasets/ImageNet1k/val/"
-#     dataset = datasets.ImageFolder(root, transform=transform)
-#     testImage , target = dataset.__getitem__(0)
-#     testImage = torch.unsqueeze(testImage, 0)
-#     with torch.no_grad():
-#         res = model(testImage,200)
-#     # hook.remove()
-#     print(res)
-
-#     # visualize_feature_maps(feature_maps)
-
+import os  
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
-    resume = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/firstTest/checkpoint.pth"
+    work_dir = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/conv"
+    resume = os.path.join(work_dir , "checkpoint.pth")
+    
     checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
     args.nb_classes = 1000
-    model = VisSegNet_argmax_S(args)
+    model = VisSegNet_conv_T(args)
+    depths=[2,2,8,2]
+    # model = VisSegNet_argmax_S(args)
+    # depths = [3, 4, 18, 4]
     model.load_state_dict(checkpoint['model'], strict=False)
     model.eval()
-
-    # preprocess = transforms.Compose([
-    # transforms.Resize((224,224)),
-    # transforms.ToTensor(),
-    # transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-    #                      std=[0.229, 0.224, 0.225])
-    # ])
     preprocess = build_transform(False, args)
+    images = {
+        "dog1" : "/home/zengshimao/datasets/ImageNet1k/val/n02113712/n02113712_43516.JPEG",
+        "dog2" : "/home/zengshimao/datasets/ImageNet1k/val/n02113712/n02113712_10575.JPEG",
+        "fish" : "/home/zengshimao/datasets/ImageNet1k/val/n01440764/n01440764_2138.JPEG",
+        "bird" : "/home/zengshimao/datasets/ImageNet1k/val/n01440764/n01440764_10306.JPEG"
+    }
+    for name , image in images.items():
+        visualize_save = os.path.join(work_dir , "mask_visualization", name)
+        if not os.path.exists(visualize_save):
+            os.makedirs(visualize_save)
+        img = Image.open(image).convert("RGB")
+        img.save(os.path.join(visualize_save , "image.png"))
+
+        input_tensor = preprocess(img).unsqueeze(0)
+        hooks = []
+        for layer_index in range(1,4):
+            for block_index in range(depths[layer_index]):
+                hooks.append( model.layers[layer_index].blocks[block_index].register_forward_hook(get_norm_hook(os.path.join(visualize_save , f"layer_{layer_index}_block_{block_index}.png"))))
+        with torch.no_grad():
+            res = model(input_tensor,200)
+        for h in hooks:
+            h.remove()
 
 
-    #小狗：/home/zengshimao/datasets/ImageNet1k/val/n02113712/n02113712_43516.JPEG
-    # 狗2 ：/home/zengshimao/datasets/ImageNet1k/val/n02113712/n02113712_10575.JPEG
-    #鱼：/home/zengshimao/datasets/ImageNet1k/val/n01440764/n01440764_2138.JPEG
-    img = Image.open("/home/zengshimao/datasets/ImageNet1k/val/n01440764/n01440764_10306.JPEG").convert("RGB")
-    input_tensor = preprocess(img).unsqueeze(0)
-
-
-    res = model(input_tensor,200)
-    pred_class = res.argmax(dim = -1)
-
-
-""""
-可视化方法：
-import matplotlib.pyplot as plt
-region_id = mask_logits.argmax(dim=-1)
-region_map = region_id.reshape(28,28)
-cmap = plt.cm.get_cmap('tab10', 8)
-plt.imshow(region_map, cmap=cmap)
-plt.savefig("/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/inference/7*7mask.png")
-"""
+# """"
+# 可视化方法：
+# import matplotlib.pyplot as plt
+# region_id = mask_logits.argmax(dim=-1)
+# region_map = region_id.reshape(28,28)
+# cmap = plt.cm.get_cmap('tab10', 8)
+# plt.imshow(region_map, cmap=cmap)
+# plt.savefig("/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/inference/7*7mask.png")
+# """

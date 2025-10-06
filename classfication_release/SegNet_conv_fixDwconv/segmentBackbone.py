@@ -7,6 +7,7 @@ from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 import math
 import torch
 import torch.nn.functional as F
+from einops import rearrange, einsum
 import torch.nn as nn
 from timm.models.layers import DropPath, trunc_normal_
 from timm.models.vision_transformer import VisionTransformer
@@ -17,7 +18,7 @@ import time
 from typing import Tuple, Union
 from functools import partial
 from einops import einsum
-from .modules import PatchEmbed , PatchMerging , DWConv2d , FeedForwardNetwork,RetNetRelPos2d,MemoryEfficientSwish,theta_shift,RotateModule
+from .modules import PatchEmbed , PatchMerging , DWConv2d , FeedForwardNetwork,RetNetRelPos2d,MemoryEfficientSwish,theta_shift,RotateModule,FeedForwardNetworkWithQuery
 import os
 
 import matplotlib.pyplot as plt
@@ -74,6 +75,308 @@ def visualize_query_partition(logits: torch.Tensor, h: int, w: int, query_id: in
             os.makedirs(savePath)
         plt.savefig(os.path.join(savePath , f"query_partition_{time.time()}.png"))
 
+
+def fuse_bn(conv, bn):
+    conv_bias = 0 if conv.bias is None else conv.bias
+    std = (bn.running_var + bn.eps).sqrt()
+    return conv.weight * (bn.weight / std).reshape(-1, 1, 1, 1), bn.bias + (conv_bias - bn.running_mean) * bn.weight / std
+
+def get_bn(dim, use_sync_bn=False):
+    if use_sync_bn:
+        return nn.SyncBatchNorm(dim)
+    else:
+        return nn.BatchNorm2d(dim)
+
+def convert_dilated_to_nondilated(kernel, dilate_rate):
+    identity_kernel = torch.ones((1, 1, 1, 1)).to(kernel.device)
+    if kernel.size(1) == 1:
+        #   This is a DW kernel
+        dilated = F.conv_transpose2d(kernel, identity_kernel, stride=dilate_rate)
+        return dilated
+    else:
+        #   This is a dense or group-wise (but not DW) kernel
+        slices = []
+        for i in range(kernel.size(1)):
+            dilated = F.conv_transpose2d(kernel[:,i:i+1,:,:], identity_kernel, stride=dilate_rate)
+            slices.append(dilated)
+        return torch.cat(slices, dim=1)
+
+def merge_dilated_into_large_kernel(large_kernel, dilated_kernel, dilated_r):
+    large_k = large_kernel.size(2)
+    dilated_k = dilated_kernel.size(2)
+    equivalent_kernel_size = dilated_r * (dilated_k - 1) + 1
+    equivalent_kernel = convert_dilated_to_nondilated(dilated_kernel, dilated_r)
+    rows_to_pad = large_k // 2 - equivalent_kernel_size // 2
+    merged_kernel = large_kernel + F.pad(equivalent_kernel, [rows_to_pad] * 4)
+    return merged_kernel
+
+def get_conv2d(in_channels, 
+               out_channels, 
+               kernel_size, 
+               stride, 
+               padding, 
+               dilation, 
+               groups, 
+               bias,
+               attempt_use_lk_impl=True):
+    
+    kernel_size = to_2tuple(kernel_size)
+    if padding is None:
+        padding = (kernel_size[0] // 2, kernel_size[1] // 2)
+    else:
+        padding = to_2tuple(padding)
+    need_large_impl = kernel_size[0] == kernel_size[1] and kernel_size[0] > 5 and padding == (kernel_size[0] // 2, kernel_size[1] // 2)
+
+    if attempt_use_lk_impl and need_large_impl:
+        print('---------------- trying to import iGEMM implementation for large-kernel conv')
+        try:
+            from depthwise_conv2d_implicit_gemm import DepthWiseConv2dImplicitGEMM
+            print('---------------- found iGEMM implementation ')
+        except:
+            DepthWiseConv2dImplicitGEMM = None
+            print('---------------- found no iGEMM. use original conv. follow https://github.com/AILab-CVC/UniRepLKNet to install it.')
+        if DepthWiseConv2dImplicitGEMM is not None and need_large_impl and in_channels == out_channels \
+                and out_channels == groups and stride == 1 and dilation == 1:
+            print(f'===== iGEMM Efficient Conv Impl, channels {in_channels}, kernel size {kernel_size} =====')
+            return DepthWiseConv2dImplicitGEMM(in_channels, kernel_size, bias=bias)
+    
+    return nn.Conv2d(in_channels, out_channels, 
+                     kernel_size=kernel_size, 
+                     stride=stride,
+                     padding=padding, 
+                     dilation=dilation, 
+                     groups=groups, 
+                     bias=bias)
+    
+
+class DilatedReparamBlock(nn.Module):
+    """
+    Dilated Reparam Block proposed in UniRepLKNet (https://github.com/AILab-CVC/UniRepLKNet)
+    We assume the inputs to this block are (N, C, H, W)
+    """
+    def __init__(self, channels, kernel_size, deploy, use_sync_bn=False, attempt_use_lk_impl=True):
+        super().__init__()
+        self.lk_origin = get_conv2d(channels, channels, kernel_size, stride=1,
+                                    padding=kernel_size//2, dilation=1, groups=channels, bias=deploy,
+                                    attempt_use_lk_impl=attempt_use_lk_impl)
+        self.attempt_use_lk_impl = attempt_use_lk_impl
+
+        #   Default settings. We did not tune them carefully. Different settings may work better.
+        if kernel_size == 19:
+            self.kernel_sizes = [5, 7, 9, 9, 3, 3, 3]
+            self.dilates = [1, 1, 1, 2, 4, 5, 7]
+        elif kernel_size == 17:
+            self.kernel_sizes = [5, 7, 9, 3, 3, 3]
+            self.dilates = [1, 1, 2, 4, 5, 7]
+        elif kernel_size == 15:
+            self.kernel_sizes = [5, 7, 7, 3, 3, 3]
+            self.dilates = [1, 1, 2, 3, 5, 7]
+        elif kernel_size == 13:
+            self.kernel_sizes = [5, 7, 7, 3, 3, 3]
+            self.dilates = [1, 1, 2, 3, 4, 5]
+        elif kernel_size == 11:
+            self.kernel_sizes = [5, 7, 5, 3, 3, 3]
+            self.dilates = [1, 1, 2, 3, 4, 5]
+        elif kernel_size == 9:
+            self.kernel_sizes = [5, 7, 5, 3, 3]
+            self.dilates = [1, 1, 2, 3, 4]
+        elif kernel_size == 7:
+            self.kernel_sizes = [5, 3, 3, 3]
+            self.dilates = [1, 1, 2, 3]
+        elif kernel_size == 5:
+            self.kernel_sizes = [3, 3]
+            self.dilates = [1, 2]
+        else:
+            raise ValueError('Dilated Reparam Block requires kernel_size >= 5')
+
+        if not deploy:
+            self.origin_bn = get_bn(channels, use_sync_bn)
+            for k, r in zip(self.kernel_sizes, self.dilates):
+                self.__setattr__('dil_conv_k{}_{}'.format(k, r),
+                                 nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=k, stride=1,
+                                           padding=(r * (k - 1) + 1) // 2, dilation=r, groups=channels,
+                                           bias=False))
+                self.__setattr__('dil_bn_k{}_{}'.format(k, r), get_bn(channels, use_sync_bn=use_sync_bn))
+
+    def forward(self, x):
+        if not hasattr(self, 'origin_bn'): # deploy mode
+            return self.lk_origin(x)
+        out = self.origin_bn(self.lk_origin(x))
+        for k, r in zip(self.kernel_sizes, self.dilates):
+            conv = self.__getattr__('dil_conv_k{}_{}'.format(k, r))
+            bn = self.__getattr__('dil_bn_k{}_{}'.format(k, r))
+            out = out + bn(conv(x))
+        return out
+
+    def merge_dilated_branches(self):
+        if hasattr(self, 'origin_bn'):
+            origin_k, origin_b = fuse_bn(self.lk_origin, self.origin_bn)
+            for k, r in zip(self.kernel_sizes, self.dilates):
+                conv = self.__getattr__('dil_conv_k{}_{}'.format(k, r))
+                bn = self.__getattr__('dil_bn_k{}_{}'.format(k, r))
+                branch_k, branch_b = fuse_bn(conv, bn)
+                origin_k = merge_dilated_into_large_kernel(origin_k, branch_k, r)
+                origin_b += branch_b
+            merged_conv = get_conv2d(origin_k.size(0), origin_k.size(0), origin_k.size(2), stride=1,
+                                    padding=origin_k.size(2)//2, dilation=1, groups=origin_k.size(0), bias=True,
+                                    attempt_use_lk_impl=self.attempt_use_lk_impl)
+            merged_conv.weight.data = origin_k
+            merged_conv.bias.data = origin_b
+            self.lk_origin = merged_conv
+            self.__delattr__('origin_bn')
+            for k, r in zip(self.kernel_sizes, self.dilates):
+                self.__delattr__('dil_conv_k{}_{}'.format(k, r))
+                self.__delattr__('dil_bn_k{}_{}'.format(k, r))
+   
+
+class ResDWConv(nn.Conv2d):
+    '''
+    Depthwise convolution with residual connection
+    '''
+    def __init__(self, dim, kernel_size=3):
+        super().__init__(dim, dim, kernel_size=kernel_size, padding=kernel_size//2, groups=dim)
+    
+    def forward(self, x):
+        x = x + super().forward(x)
+        return x
+        
+class LayerNorm2d(nn.LayerNorm):
+    def __init__(self, dim):
+        super().__init__(normalized_shape=dim, eps=1e-6)
+    
+    def forward(self, x):
+        # print(x.shape)
+        x = rearrange(x, 'b c h w -> b h w c')
+        x = super().forward(x)
+        x = rearrange(x, 'b h w c -> b c h w')
+        return x.contiguous()
+
+class SEModule(nn.Module):
+    def __init__(self, dim, red=8, inner_act=nn.GELU, out_act=nn.Sigmoid):
+        super().__init__()
+        inner_dim = max(16, dim // red)
+        self.proj = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(dim, inner_dim, kernel_size=1),
+            inner_act(),
+            nn.Conv2d(inner_dim, dim, kernel_size=1),
+            out_act(),
+        )
+        
+    def forward(self, x):
+        x = x * self.proj(x)
+        return x
+
+
+
+class LayerScale(nn.Module):
+    def __init__(self, dim, init_value=1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim, 1, 1, 1)*init_value, 
+                                   requires_grad=True)
+        self.bias = nn.Parameter(torch.zeros(dim), requires_grad=True)
+
+    def forward(self, x):
+        x = F.conv2d(x, weight=self.weight, bias=self.bias, groups=x.shape[1])
+        return x
+
+class GRN(nn.Module):
+    """ GRN (Global Response Normalization) layer
+    Originally proposed in ConvNeXt V2 (https://arxiv.org/abs/2301.00808)
+    This implementation is more efficient than the original (https://github.com/facebookresearch/ConvNeXt-V2)
+    We assume the inputs to this layer are (N, C, H, W)
+    """
+    def __init__(self, dim, use_bias=True):
+        super().__init__()
+        self.use_bias = use_bias
+        self.gamma = nn.Parameter(torch.zeros(1, dim, 1, 1))
+        if self.use_bias:
+            self.beta = nn.Parameter(torch.zeros(1, dim, 1, 1))
+
+    def forward(self, x):
+        Gx = torch.norm(x, p=2, dim=(-1, -2), keepdim=True)
+        Nx = Gx / (Gx.mean(dim=1, keepdim=True) + 1e-6)
+        if self.use_bias:
+            return (self.gamma * Nx + 1) * x + self.beta
+        else:
+            return (self.gamma * Nx + 1) * x
+        
+
+class RepConvBlock(nn.Module):
+
+    def __init__(self, 
+                 dim=64,
+                 kernel_size=7,
+                 mlp_ratio=4,
+                 ls_init_value=None,
+                 res_scale=False,
+                 drop_path=0,
+                 num_heads = 4,
+                 norm_layer=LayerNorm2d,
+                 use_gemm=False,
+                 deploy=False,
+                 use_checkpoint=False):
+        super().__init__()
+        
+        self.res_scale = res_scale
+        self.use_checkpoint = use_checkpoint
+        
+        mlp_dim = int(dim*mlp_ratio)
+        
+        self.dwconv = ResDWConv(dim, kernel_size=3)
+    
+        self.proj = nn.Sequential(
+            norm_layer(dim),
+            DilatedReparamBlock(dim, kernel_size=kernel_size, deploy=deploy, use_sync_bn=False, attempt_use_lk_impl=use_gemm),
+            nn.BatchNorm2d(dim),
+            SEModule(dim),
+            nn.Conv2d(dim, mlp_dim, kernel_size=1),
+            nn.GELU(),
+            ResDWConv(mlp_dim, kernel_size=3),
+            GRN(mlp_dim),
+            nn.Conv2d(mlp_dim, dim, kernel_size=1),
+            DropPath(drop_path) if drop_path > 0 else nn.Identity(),
+        )
+        self.crossAttention = nn.MultiheadAttention(dim, num_heads,batch_first=True)
+        self.pre_layer_norm = nn.LayerNorm(dim, eps=1e-6)
+        self.final_layer_norm = nn.LayerNorm(dim, eps=1e-6)
+        self.ffn = FeedForwardNetwork(dim, mlp_dim,subconv=False)
+        
+        self.ls = LayerScale(dim, init_value=ls_init_value) if ls_init_value is not None else nn.Identity()
+        
+    def forward_features(self, x  , queries):
+        # x: b c h w 
+        # q : b n q
+        b , c , h , w = x.shape
+        # print(f"enter block , {x.shape}")
+        x = self.dwconv(x)
+        
+        if self.res_scale:
+            x = self.ls(x) + self.proj(x)
+        else:
+            drop_path = self.proj[-1]
+            x = x + drop_path(self.ls(self.proj[:-1](x)))
+
+        # b , h , w , c = x.shape
+        x = rearrange(x , "b  c  h  w -> b (h w) c")
+        queries = queries +  self.crossAttention(self.pre_layer_norm(queries) , x , x , need_weights = False)[0]
+        queries = queries + self.ffn(self.final_layer_norm(queries))
+        x = rearrange(x , "b (h w) c -> b c h w" ,h = h , w = w)
+        
+        return x , queries
+    
+    def forward(self, x , queries ):
+        
+        if self.use_checkpoint and x.requires_grad:
+            x , queries = checkpoint(self.forward_features, x, queries, use_reentrant=False)
+        else:
+            x , queries = self.forward_features(x , queries)
+        
+        return x , queries
+    
+    
+    
+
 class MaskScheduler:
     def __init__(self, 
                  max_epoch: int,
@@ -127,6 +430,7 @@ class MaskScheduler:
             return mask, False  # hard
 
         else:
+            # hw , q
             region_id = logits.argmax(dim=-1)
             mask = (region_id.unsqueeze(-1) == region_id.unsqueeze(-2)).float()
             return mask, False  # hard
@@ -174,8 +478,7 @@ class MaskAttention(nn.Module):
 
         q_h = q.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
         k_h = k.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
-        #FIXME:
-        v_h = k.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
+        v_h = v.reshape(bsz , seq_len , self.num_heads , -1).permute(0 , 2 , 1 , 3)
         
         qk_mat = q_h @ k_h.transpose(-1, -2) #(b n l l)
         
@@ -367,10 +670,11 @@ class RetBlock(nn.Module):
             self.retention = VisionRetentionAll(embed_dim, num_heads)
         self.drop_path = DropPath(drop_path)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim, eps=1e-6)
-        #FIXME:这里将ffn里面的一个dwconv关闭了
-        self.ffn = FeedForwardNetwork(embed_dim, ffn_dim,subconv=False)
+        self.ffn = FeedForwardNetwork(embed_dim, ffn_dim,subconv=True)
         self.pos = DWConv2d(embed_dim, 3, 1, 1)
         self.crossAttention = nn.MultiheadAttention(embed_dim, num_heads,batch_first=True)
+        self.queriesFFN = FeedForwardNetwork(embed_dim , ffn_dim , subconv=False)
+        
         if layerscale:
             self.gamma_1 = nn.Parameter(layer_init_values * torch.ones(1, 1, 1, embed_dim),requires_grad=True)
             self.gamma_2 = nn.Parameter(layer_init_values * torch.ones(1, 1, 1, embed_dim),requires_grad=True)
@@ -391,18 +695,22 @@ class RetBlock(nn.Module):
         else:
             x = x + self.drop_path(self.retention(self.retention_layer_norm(x), retention_rel_pos, chunkwise_recurrent, incremental_state))
             x = x + self.drop_path(self.ffn(self.final_layer_norm(x)))
+            
         b , h , w , c = x.shape
+        
         x = x.reshape( b , -1 ,c)
         queries = queries +  self.crossAttention(self.retention_layer_norm(queries) , x , x , need_weights = False)[0]
-        queries = queries + self.ffn(self.final_layer_norm(queries))
+        queries = queries + self.queriesFFN(self.final_layer_norm(queries))
         x = x.reshape( b , h , w, c)
         #在这里做cross attention 吧！随机初始化更好还是添加位置编码比较好？
         return x , queries
-def visualize(mask_logits):
+
+
+def visualize(mask_logits , hw):
     with torch.no_grad():
         import matplotlib.pyplot as plt
         region_id = mask_logits.argmax(dim=-1)
-        region_map = region_id.reshape(28,28)
+        region_map = region_id.reshape(hw,hw)
         cmap = plt.cm.get_cmap('tab10', 8)
         plt.imshow(region_map, cmap=cmap)
 
@@ -413,15 +721,15 @@ class SegBlock(nn.Module):
         self.layerscale = layerscale
         self.embed_dim = embed_dim
         self.retention_layer_norm = nn.LayerNorm(self.embed_dim, eps=1e-6)
-        self.queriesNorm = nn.LayerNorm(self.embed_dim, eps=1e-6)
+        # self.queriesNorm = nn.LayerNorm(self.embed_dim, eps=1e-6)
         self.mask_attention = MaskAttention(embed_dim, num_heads)
         self.drop_path = DropPath(drop_path)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim, eps=1e-6)
-        self.ffn = FeedForwardNetwork(embed_dim, ffn_dim,subconv=False)
+        self.ffn = FeedForwardNetworkWithQuery(embed_dim, ffn_dim,subconv=True)
         self.pos = DWConv2d(embed_dim, 3, 1, 1)
+        self.logit_temperature = nn.Parameter(torch.tensor(math.sqrt(embed_dim), dtype=torch.float32))
         #FIXME:
         self.mask_scheduler = MaskScheduler(max_epoch=200)
-        self.logit_temperature = nn.Parameter(torch.tensor(math.sqrt(embed_dim), dtype=torch.float32))
         if layerscale:
             self.gamma_1 = nn.Parameter(layer_init_values * torch.ones(1, 1, 1, embed_dim),requires_grad=True)
             self.gamma_2 = nn.Parameter(layer_init_values * torch.ones(1, 1, 1, embed_dim),requires_grad=True)
@@ -439,32 +747,20 @@ class SegBlock(nn.Module):
         # b , N , c
         x = x.reshape(b,-1,c)
         x_with_q = torch.cat((queries , x) , dim=1)
-
-        # mask_logits =  F.normalize(x) @ F.normalize(queries.transpose(-1, -2)) # b , N ,numq
+        
         mask_logits = F.normalize(x , dim=-1) @ F.normalize(queries,dim=-1).transpose(-1, -2)
-        # mask_logits = x @ queries.transpose(-1,-2)
         mask_logits = mask_logits * self.logit_temperature.float()
-        # mask_logits =  F.normalize(x , dim = -1) @ F.normalize(queries , dim=-1).transpose(-1,-2) # b , N ,numq
-        # mask_logits =  x @ queries.transpose(-1,-2) # b , N ,numq
         
         mask = torch.ones(b,num_q+h*w , num_q+h*w,dtype=x_with_q.dtype,device=x_with_q.device)
         imgMask , isSoft  = self.mask_scheduler(mask_logits, epoch)
         mask[:,num_q:,num_q:] = imgMask
-        
-        
-        
-        # #FIXME: 
-        # mask_logist = x @ queries.transpose(-1, -2) # b , N ,numq 
-        # region_id = mask_logist .argmax(dim=-1) 
-        # mask = torch.ones(b,num_q+h*w , num_q+h*w,dtype=x_with_q.dtype,device=x_with_q.device) # B, N , N 
-        # mask[:,num_q:,num_q:] = region_id.unsqueeze(-1) == region_id.unsqueeze(-2)
-        
+
         if self.layerscale:
             x_with_q = x_with_q + self.drop_path(self.gamma_1 * self.mask_attention(self.retention_layer_norm(x_with_q), mask , h ,w , isSoft))
-            x_with_q = x_with_q + self.drop_path(self.gamma_2 * self.ffn(self.final_layer_norm(x_with_q)))
+            x_with_q = x_with_q + self.drop_path(self.gamma_2 * self.ffn(self.final_layer_norm(x_with_q) , num_q , h , w))
         else:
             x_with_q = x_with_q + self.drop_path(self.mask_attention(self.retention_layer_norm(x_with_q) , mask , h , w , isSoft))
-            x_with_q = x_with_q + self.drop_path(self.ffn(self.final_layer_norm(x_with_q)))
+            x_with_q = x_with_q + self.drop_path(self.ffn(self.final_layer_norm(x_with_q) , num_q , h  , w))
 
         x = x_with_q[:,num_q:,:].reshape(b,h,w,c)
         queries = x_with_q[:,:num_q,:]
@@ -498,7 +794,6 @@ class SegLayer(nn.Module):
     def forward(self, x , queries , epoch):
         b, h, w, d = x.size()
         b,n,d = queries.size()
-    
         
         for index , blk in enumerate(self.blocks):
             x  , queries= blk(x , queries , epoch)
@@ -506,6 +801,7 @@ class SegLayer(nn.Module):
         if self.downsample is not None:
             x = self.downsample(x)
             queries = self.queriesLinear(queries)
+
         return x , queries
     
 class BasicLayer(nn.Module):
@@ -579,6 +875,52 @@ class BasicLayer(nn.Module):
             
         return x , queries
 
+class ConvLayer(nn.Module):
+    def __init__(self, embed_dim, out_dim, depth,kernel_size,
+                 ls_init_value: float, res_scale: float,num_heads = 4,
+                 mlp_ratio=4, dpr=0., norm_layer=nn.LayerNorm, use_gemm=False,
+                 deploy = False, use_checkpoint=False , downsample: PatchMerging=None):
+        super().__init__()
+        self.blocks = nn.ModuleList()
+        for i in range(depth):
+            self.blocks.append(
+                RepConvBlock(
+                    dim=embed_dim,
+                    kernel_size=kernel_size,
+                    mlp_ratio=mlp_ratio,
+                    num_heads=num_heads,
+                    ls_init_value=ls_init_value,
+                    res_scale=res_scale,
+                    norm_layer=LayerNorm2d,
+                    drop_path=dpr[i],
+                    use_gemm=use_gemm,
+                    deploy=deploy,
+                    use_checkpoint=use_checkpoint,
+                )
+        )
+            
+        if downsample is not None:
+            self.downsample = downsample(dim=embed_dim, out_dim=out_dim, norm_layer=norm_layer)
+            self.queriesLinear = nn.Linear(embed_dim , out_dim)
+        else:
+            self.downsample = None
+            self.queriesLinear = None
+    
+    def forward(self,  x , queries):
+        b, c  , h , w = x.size()
+        b,n,d = queries.size()
+        
+        for blk in self.blocks:
+            x , queries= blk(x , queries)
+        
+        x = x.permute(0,2,3,1)   
+        
+        if self.downsample is not None:
+            x = self.downsample(x)
+            queries = self.queriesLinear(queries)
+        
+            
+        return x , queries
 
 class VisSegNet(nn.Module):
 
@@ -611,22 +953,34 @@ class VisSegNet(nn.Module):
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
             if i_layer == 0:  
-                layer = BasicLayer(
-                    embed_dim=embed_dims[i_layer],
-                    out_dim=embed_dims[i_layer+1] if (i_layer < self.num_layers - 1) else None,
-                    depth=depths[i_layer],
-                    num_heads=num_heads[i_layer],
-                    init_value=init_values[i_layer],
-                    heads_range=heads_ranges[i_layer],
-                    ffn_dim=int(mlp_ratios[i_layer]*embed_dims[i_layer]),
-                    drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
-                    norm_layer=norm_layer,
-                    chunkwise_recurrent=chunkwise_recurrents[i_layer],
-                    downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
-                    use_checkpoint=use_checkpoints[i_layer],
-                    layerscale=layerscales[i_layer],
-                    layer_init_values=layer_init_values
-                )
+                #好大的核
+                layer = ConvLayer(embed_dim= embed_dims[i_layer],
+                                  out_dim=embed_dims[i_layer+1],
+                                  depth=depths[i_layer],
+                                  kernel_size = 17,
+                                  ls_init_value = None,
+                                  res_scale = True,
+                                  num_heads=num_heads[i_layer],
+                                  mlp_ratio=mlp_ratios[i_layer],
+                                  dpr=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                                  downsample=PatchMerging,
+                                  )
+                # layer = BasicLayer(
+                #     embed_dim=embed_dims[i_layer],
+                #     out_dim=embed_dims[i_layer+1] if (i_layer < self.num_layers - 1) else None,
+                #     depth=depths[i_layer],
+                #     num_heads=num_heads[i_layer],
+                #     init_value=init_values[i_layer],
+                #     heads_range=heads_ranges[i_layer],
+                #     ffn_dim=int(mlp_ratios[i_layer]*embed_dims[i_layer]),
+                #     drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                #     norm_layer=norm_layer,
+                #     chunkwise_recurrent=chunkwise_recurrents[i_layer],
+                #     downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
+                #     use_checkpoint=use_checkpoints[i_layer],
+                #     layerscale=layerscales[i_layer],
+                #     layer_init_values=layer_init_values
+                # )
             else:
                 layer = SegLayer(
                     embed_dim=embed_dims[i_layer],
@@ -676,7 +1030,7 @@ class VisSegNet(nn.Module):
         # queries = torch.randn(b,num_q , self.embed_dim)
         # queries = queries / queries.norm(dim=-1, keepdim=True)
         
-        #  b c , h ,w
+        #  输出 b c , h ,w
         x = self.patch_embed(x)
         #FIXME : N , C -> B , N , C
         # queries = self.q.weight[None , :].expand(x.shape[0] , -1,-1)
@@ -684,10 +1038,13 @@ class VisSegNet(nn.Module):
         
         firstlayer = self.layers[0]
         
+        
+        
         # 在这个layer内部，每个block都会做一次corss attention
 
         x  , queries = firstlayer(x ,queries)
         
+        # x = rearrange(x , "b c h w -> b h w c")
         for layer in self.layers[1:]:
             x , queries = layer(x , queries , epoch)
 
@@ -706,29 +1063,29 @@ class VisSegNet(nn.Module):
 
 
 
-@register_model
-def VisSegNet_S(args):
-    model = VisSegNet(
-        num_classes= args.nb_classes,
-        embed_dims=[64, 128, 256, 512],
-        depths=[3, 4, 18, 4],
-        num_heads=[4, 4, 8, 16],
-        init_values=[2, 2, 2, 2],
-        heads_ranges=[4, 4, 6, 6],
-        mlp_ratios=[4, 4, 3, 3],
-        drop_path_rate=0.15,
-        chunkwise_recurrents=[True, True, True, False],
-        layerscales=[False, False, False, False]
-    )
-    model.default_cfg = _cfg()
-    return model
+# @register_model
+# def VisSegNet_conv_S(args):
+#     model = VisSegNet(
+#         num_classes= args.nb_classes,
+#         embed_dims=[64, 128, 256, 512],
+#         depths=[3, 4, 18, 4],
+#         num_heads=[4, 4, 8, 16],
+#         init_values=[2, 2, 2, 2],
+#         heads_ranges=[4, 4, 6, 6],
+#         mlp_ratios=[4, 4, 3, 3],
+#         drop_path_rate=0.15,
+#         chunkwise_recurrents=[True, True, True, False],
+#         layerscales=[False, False, False, False]
+#     )
+#     model.default_cfg = _cfg()
+#     return model
 
 @register_model
-def VisSegNet_T(args):
+def VisSegNet_conv_fixDwconv_T(args):
     model = VisSegNet(
         num_classes= args.nb_classes,
         embed_dims=[64, 128, 256, 512],
-        depths=[2, 2,8,2],
+        depths=[2,2,8,2],
         num_heads=[4, 4, 8, 16],
         init_values=[2, 2, 2, 2],
         heads_ranges=[4, 4, 6, 6],
