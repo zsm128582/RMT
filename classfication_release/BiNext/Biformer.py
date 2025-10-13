@@ -110,7 +110,6 @@ class Block(nn.Module):
         x = x + self.pos_embed(x)
         # permute to NHWC tensor for attention & mlp
         x = x.permute(0, 2, 3, 1) # (N, C, H, W) -> (N, H, W, C)
-
         # attention & mlp
         if self.pre_norm:
             if self.use_layer_scale:
