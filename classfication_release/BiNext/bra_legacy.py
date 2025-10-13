@@ -17,6 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
+import math
 
 
 from torch.nn.attention.flex_attention import (
@@ -112,7 +113,7 @@ class QKVLinear(nn.Module):
         self.qkv = nn.Linear(dim, qk_dim + qk_dim + dim, bias=bias)
     
     def forward(self, x):
-        q, k , v = self.qkv(x).split([self.qk_dim, self.qk_dim + self.dim], dim=-1)
+        q, k , v = self.qkv(x).split([self.qk_dim, self.qk_dim , self.dim], dim=-1)
         return q, k , v
         # q, k, v = self.qkv(x).split([self.qk_dim, self.qk_dim, self.dim], dim=-1)
         # return q, k, v
@@ -239,7 +240,8 @@ class BiLevelRoutingAttention(nn.Module):
 
         # patchify, (n, p^2, w, w, c), keep 2d window as we need 2d pooling to reduce kv size
         x = rearrange(x, "n (j h) (i w) c -> n (j i) h w c", j=self.n_win, i=self.n_win)
-
+        B , winNum , winLength , _ , C = x.shape
+        winPix = winLength * winLength
         #################qkv projection###################
         # q: (n, p^2, w, w, c_qk)
         # kv: (n, p^2, w, w, c_qk+c_v)
@@ -285,14 +287,15 @@ class BiLevelRoutingAttention(nn.Module):
         """
         ############ 继续 #################
         # b , n  , n
-        B , winNum , winPix , C = q_pix.shape()
+
+
         attn_logit = (q_win*self.scale) @ k_win.transpose(-2, -1)
         _, top_k_indices = torch.topk(attn_logit, self.topk, dim=-1)
-        mask = torch.zeros_like(attn_logit, dtype=torch.bool)
+        mask = torch.zeros_like(attn_logit, dtype=torch.bool , device=q_pix.device)
         mask.scatter_(-1, top_k_indices, True)
 
-        win_mask = torch.ones((B , winNum , winNum //winPix ),dtype=torch.bool)
-        mask = torch.cat( (mask ,win_mask) , dim= 1)
+        win_mask = torch.ones((B , winNum , math.ceil(winNum /winPix) ),dtype=torch.bool ,device=q_pix.device )
+        mask = torch.cat( (mask ,win_mask) , dim= 2)
 
         def mask_mod(b , h , q_idx , kv_idx):
             # return (q_idx >= H*W) | (kv_idx >= H*W) | (mask[b ,q_idx - numq//(h_w * h_w) , kv_idx//(h_w * h_w) ]==1)
@@ -302,18 +305,18 @@ class BiLevelRoutingAttention(nn.Module):
 
         #这里需要分完头的QKV
 
-        Q = rearrange(q_pix , 'b p2 h w (m c) -> b m (p2 h w) c',m =self.num_heads).contiguous()
+        Q = rearrange(q_pix , 'b p2 n (m c) -> b m (p2 n) c',m =self.num_heads).contiguous()
         k_pix = rearrange(k_pix , 'b p2 w c -> b (p2 w) c')
         v_pix = rearrange(v_pix , 'b p2 w c -> b (p2 w) c')
 
         K = torch.cat((k_pix , k_win) , dim= 1)
         V = torch.cat((v_pix , v_win) , dim = 1)
         K = rearrange(K , 'b n (m c) -> b m n c' , m = self.num_heads).contiguous()
-        V = rearrange(K , 'b n (m c) -> b m n c' , m = self.num_heads).contiguous()
+        V = rearrange(V , 'b n (m c) -> b m n c' , m = self.num_heads).contiguous()
 
         #return  b h (p2 h w) c
         out = flex_attention(Q , K , V , block_mask=blockmask , scale=self.scale)
-        out = rearrange(out , ' b m (p2 h w) c -> b p2 h w (m c) ')
+        out = rearrange(out , ' b m (p2 h w) c -> b p2 h w (m c) ' , p2 = winNum , h = winLength , w = winLength)
         out = rearrange(out , 'b (i j) h w c -> b (i h) (j w) c' , i = self.n_win , j = self.n_win)
         out = out + lepe
         out = self.wo(out)

@@ -60,6 +60,19 @@ class MaskQKVLayer(nn.Module):
         assignment = x.reshape(b, -1 , d)  @ queries.transpose(-1, -2)
         #计算assignment
 
+        ##############思考一下应该做什么####################
+        """
+        现有
+        assignment ： 现有一个shape为 b n q的分配矩阵
+        queries : b q c
+        x : b n q
+        p: 剪枝率 (1-p)保留率
+
+        我需要：
+        二维位置编码。这个是否可以使用
+        """
+        ###################################################
+
         # got logits
 
 

@@ -38,6 +38,7 @@ from SegNet_conv.segmentBackbone import VisSegNet_conv_T
 from Qnet.segmentBackbone import Qnet_T
 from SegNet_conv_fixAttention.segmentBackbone import     VisSegNet_conv_fixAtten_T
 from SegNet_conv_fixDwconv.segmentBackbone import VisSegNet_conv_fixDwconv_T
+from BiNext.Biformer import binext_tiny
 
 archs = {
             'RMT_T': RMT_T3,
@@ -51,7 +52,8 @@ archs = {
             'Qnet_T' : Qnet_T,
             'VisSegNet_conv_fixAtten_T' : VisSegNet_conv_fixAtten_T,
             'VisSegNet_conv_fixDwconv_T' : VisSegNet_conv_fixDwconv_T,
-            'VisSegNet_argmax_T':VisSegNet_argmax_T
+            'VisSegNet_argmax_T':VisSegNet_argmax_T,
+            'binext_T' : binext_tiny
             # 'Restormer' : Restormer_default,
             # 'Utentive' : Utentive_default,
             # 'Half' : HalfRestomer_defalt
