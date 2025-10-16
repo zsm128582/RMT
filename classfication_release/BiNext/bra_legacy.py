@@ -279,11 +279,11 @@ class BiLevelRoutingAttention(nn.Module):
         我现在需要：
         mask：b p2 (p2+ p2//hw) 
             mask 获取方法： attn_logit = (query*self.scale) @ key.transpose(-2, -1) # (n, p^2, p^2) 求出每一列的第k大。变成二值
-                            然后还得concat一圈 b p2 p2//hw的True
-            Q: q_pix : b (p2 h w ) c
-            
-            k : k_pix + kwin :  b [(p2 h w )+ p2] c
-            v : v_pix + vwin : b [(p2 h w )+ p2] c
+            然后还得concat一圈 b p2 p2//hw的True
+        Q: q_pix : b (p2 h w ) c
+        
+        k : k_pix + kwin :  b [(p2 h w )+ p2] c
+        v : v_pix + vwin : b [(p2 h w )+ p2] c
         """
         ############ 继续 #################
         # b , n  , n
@@ -294,14 +294,15 @@ class BiLevelRoutingAttention(nn.Module):
         mask = torch.zeros_like(attn_logit, dtype=torch.bool , device=q_pix.device)
         mask.scatter_(-1, top_k_indices, True)
 
-        win_mask = torch.ones((B , winNum , math.ceil(winNum /winPix) ),dtype=torch.bool ,device=q_pix.device )
+        win_mask = torch.ones((B , winNum , math.ceil(winNum / winPix) ),dtype=torch.bool ,device=q_pix.device)
+        # mask : b p2 p2 
         mask = torch.cat( (mask ,win_mask) , dim= 2)
 
         def mask_mod(b , h , q_idx , kv_idx):
             # return (q_idx >= H*W) | (kv_idx >= H*W) | (mask[b ,q_idx - numq//(h_w * h_w) , kv_idx//(h_w * h_w) ]==1)
             return mask[b , q_idx//winPix , kv_idx //winPix]
         
-        blockmask = create_block_mask(mask_mod , B = B , H = self.num_heads , Q_LEN= winNum*winPix , KV_LEN= winNum*winPix+winNum ,_compile=True)
+        blockmask = create_block_mask(mask_mod , B = B , H = self.num_heads , Q_LEN= winNum*winPix , KV_LEN= winNum*winPix+winNum , _compile=True)
 
         #这里需要分完头的QKV
 

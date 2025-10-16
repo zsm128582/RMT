@@ -12,7 +12,7 @@ from timm.models.layers import DropPath, trunc_normal_
 from timm.models.vision_transformer import VisionTransformer
 from timm.models.registry import register_model
 from timm.models.vision_transformer import _cfg
-from fvcore.nn import FlopCountAnalysis, flop_count_table
+# from fvcore.nn import FlopCountAnalysis, flop_count_table
 import time
 from typing import Tuple, Union
 from functools import partial

@@ -306,9 +306,10 @@ model_urls = {
 # https://github.com/huggingface/pytorch-image-models/blob/4b8cfa6c0a355a9b3cb2a77298b240213fb3b921/timm/models/_factory.py#L93
 
 @register_model
-def biformer_tiny(pretrained=False, pretrained_cfg=None,
+def biformer_tiny(args,pretrained=False, pretrained_cfg=None,
                   pretrained_cfg_overlay=None, **kwargs):
     model = BiFormer(
+        num_classes=args.nb_classes,
         depth=[2, 2, 8, 2],
         embed_dim=[64, 128, 256, 512], mlp_ratios=[3, 3, 3, 3],
         #------------------------------

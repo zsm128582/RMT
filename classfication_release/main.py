@@ -16,8 +16,8 @@ from timm.scheduler import create_scheduler
 from timm.optim import create_optimizer
 from timm.utils import NativeScaler, get_state_dict, ModelEma
 
-from fvcore.nn import FlopCountAnalysis
-from fvcore.nn import flop_count_table
+# from fvcore.nn import FlopCountAnalysis
+# from fvcore.nn import flop_count_table
 
 from datasets import build_dataset
 from engine import train_one_epoch, evaluate
@@ -26,34 +26,41 @@ from samplers import RASampler
 import utils
 import os
 
-from RMT import RMT_T3, RMT_S, RMT_M2, RMT_L6
-# from vsa import VSN
-# from Restore import Restormer_default
-# from Utentive import Utentive_default
-# from HalfRestore import HalfRestomer_defalt
-from Biformer.Biformer import biformer_base
-from SegNet.segmentBackbone import VisSegNet_S
-from SegNet_argmax.segmentBackbone import VisSegNet_argmax_T
-from SegNet_conv.segmentBackbone import VisSegNet_conv_T
-from Qnet.segmentBackbone import Qnet_T
-from SegNet_conv_fixAttention.segmentBackbone import     VisSegNet_conv_fixAtten_T
-from SegNet_conv_fixDwconv.segmentBackbone import VisSegNet_conv_fixDwconv_T
+# from RMT import RMT_T3, RMT_S, RMT_M2, RMT_L6
+# # from vsa import VSN
+# # from Restore import Restormer_default
+# # from Utentive import Utentive_default
+# # from HalfRestore import HalfRestomer_defalt
+# from Biformer.Biformer import biformer_base
+# from SegNet.segmentBackbone import VisSegNet_S
+# from SegNet_argmax.segmentBackbone import VisSegNet_argmax_T
+# from SegNet_conv.segmentBackbone import VisSegNet_conv_T
+# from Qnet.segmentBackbone import Qnet_T
+# from SegNet_conv_fixAttention.segmentBackbone import     VisSegNet_conv_fixAtten_T
+# from SegNet_conv_fixDwconv.segmentBackbone import VisSegNet_conv_fixDwconv_T
 from BiNext.Biformer import binext_tiny
-
+from Biformer.Biformer import biformer_tiny
+from TokenAttention.segmentBackbone import tokenNet_t
+from TokenGalerkinAttention.segmentBackbone import tokenGalerkin_t
+from UNet.BiUnet import BiUnet_t
 archs = {
-            'RMT_T': RMT_T3,
-            'RMT_S': RMT_S,
-            'RMT_B': RMT_M2,
-            'RMT_L': RMT_L6,
-            # 'VSN' : VSN,
-            "Biformer" : biformer_base,
-            'SegNet' : VisSegNet_S,
-            'VisSegNet_conv_T' : VisSegNet_conv_T,
-            'Qnet_T' : Qnet_T,
-            'VisSegNet_conv_fixAtten_T' : VisSegNet_conv_fixAtten_T,
-            'VisSegNet_conv_fixDwconv_T' : VisSegNet_conv_fixDwconv_T,
-            'VisSegNet_argmax_T':VisSegNet_argmax_T,
-            'binext_T' : binext_tiny
+            # 'RMT_T': RMT_T3,
+            # 'RMT_S': RMT_S,
+            # 'RMT_B': RMT_M2,
+            # 'RMT_L': RMT_L6,
+            # # 'VSN' : VSN,
+            # "Biformer" : biformer_base,
+            # 'SegNet' : VisSegNet_S,
+            # 'VisSegNet_conv_T' : VisSegNet_conv_T,
+            # 'Qnet_T' : Qnet_T,
+            # 'VisSegNet_conv_fixAtten_T' : VisSegNet_conv_fixAtten_T,
+            # 'VisSegNet_conv_fixDwconv_T' : VisSegNet_conv_fixDwconv_T,
+            # 'VisSegNet_argmax_T':VisSegNet_argmax_T,
+            'binext_T' : binext_tiny,
+            'biformer_t':biformer_tiny,
+            'tokenNet_t':tokenNet_t,
+            'tokenGalerkin_t' : tokenGalerkin_t,
+            "BiUnet_t":BiUnet_t
             # 'Restormer' : Restormer_default,
             # 'Utentive' : Utentive_default,
             # 'Half' : HalfRestomer_defalt
@@ -338,7 +345,7 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
