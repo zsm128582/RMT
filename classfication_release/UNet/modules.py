@@ -19,25 +19,49 @@ from functools import partial
 from einops import einsum
 from einops import rearrange
 
-class PatchExpand(nn.Module):
-    def __init__(self, input_resolution, dim, dim_scale=2, norm_layer=nn.LayerNorm):
+
+# 定义反卷积上采样模块
+class DeconvUpsample(nn.Module):
+    def __init__(self, input_dim, output_dim):
         super().__init__()
-        self.input_resolution = input_resolution
-        self.dim = dim
-        self.expand = nn.Linear(dim, 2 * dim, bias=False) if dim_scale == 2 else nn.Identity()
-        self.norm = norm_layer(dim // dim_scale)
+        # 反卷积层：输入通道input_dim，输出通道output_dim， kernel=4, stride=2, padding=1
+        # 该参数组合可实现2倍上采样（h和w各扩大2倍）
+        self.deconv = nn.ConvTranspose2d(
+            in_channels=input_dim,
+            out_channels=output_dim,
+            kernel_size=4,
+            stride=2,
+            padding=1
+        )
+        self.norm = nn.BatchNorm2d(output_dim)
+    
+    def forward(self, x):
+        # 输入x形状：[b, h, w, c]（通道在后）
+        # 步骤1：转换为PyTorch格式 [b, c, h, w]（通道在前）
+        x = x.permute(0, 3, 1, 2)  # 维度重排
+        
+        # 步骤2：反卷积上采样（2倍）
+        x = self.deconv(x)  # 输出形状：[b, output_dim, 2h, 2w]
+        x = self.norm(x)
+        
+        # 步骤3：转回通道在后的格式 [b, 2h, 2w, output_dim]
+        x = x.permute(0, 2, 3, 1)
+        return x
+
+class PatchExpand(nn.Module):
+    def __init__(self, inputdim, outputdim, scale=2, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.outputdim = outputdim
+        self.scale = scale
+        self.expand = nn.Linear(inputdim, outputdim * 4, bias=False)
+        self.norm = norm_layer(outputdim)
 
     def forward(self, x):
         """
         x: B, H*W, C
         """
-        H, W = self.input_resolution
-        x = self.expand(x)
-        B, L, C = x.shape
-        assert L == H * W, "input feature has wrong size"
-
-        x = x.view(B, H, W, C)
-        x = rearrange(x, 'b h w (p1 p2 c)-> b (h p1) (w p2) c', p1=2, p2=2, c=C // 4)
+        B 
+        x = rearrange(x, 'b h w (p1 p2 c)-> b (h p1) (w p2) c', p1=2, p2=2, c=self.outputdim)
         x = x.view(B, -1, C // 4)
         x = self.norm(x)
 
@@ -66,7 +90,10 @@ class Encoder(nn.Module):
         patch_size (int): Patch token size. Default: 4.
         in_chans (int): Number of input image channels. Default: 3.
         embed_dim (int): Number of linear projection output channels. Default: 96.
-        norm_layer (nn.Module, optional): Normalization layer. Default: None
+        norm_layer (nn.Module, optional): Normalization layer. Default: None\
+        
+    #输出:
+        None , 1/16 , 1/8 , 1/4
     """
 
     def __init__(self, in_chans=3, embed_dim=[64, 128, 256, 512], norm_layer=None ):

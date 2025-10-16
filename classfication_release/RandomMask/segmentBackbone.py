@@ -46,7 +46,138 @@ class MaskQKVLayer(nn.Module):
             self.downsample = None
             self.queriesLinear = None
         
+    def batched_grouped_random_prune(
+        self,
+        image_patches: torch.Tensor,
+        assignment_matrix: torch.Tensor,
+        pruning_ratio: float
+    ) :
         
+        B, N, C = image_patches.shape
+        Q = assignment_matrix.shape[-1]
+        device = image_patches.device
+
+        # 1. 确定每个patch的类别ID 以及 计算理想的固定保留数量
+        N_fixed_pruned = int(N * (1.0 - pruning_ratio))
+        class_ids = torch.argmax(assignment_matrix, dim=-1)  # [B, N]
+
+        # 2. 为每个patch生成一个随机分数
+        rand_scores = torch.rand(B, N, device=device)
+
+        # 3. 计算每个类别应该保留的百分比阈值
+        # 我们将保留分数低于 (1 - pruning_ratio) 的patch
+        keep_threshold = 1.0 - pruning_ratio
+        
+        # 4. 核心逻辑: 计算每个patch在其类别内的分数排位 (rank)
+        # 通过将类别ID和大数相乘，加上随机分数，我们可以一次性排序，
+        # 从而隐式地先按类别分组，再按分数排序。
+        # N+1 确保类别之间不会混淆
+        combined_key = class_ids * (N + 1) + rand_scores  # [B, N]
+        
+        # argsort后，相同类别的patch会聚集在一起，并按分数升序排列
+        sorted_indices = torch.argsort(combined_key, dim=1) # [B, N]
+
+        # 创建一个从0到N-1的arange tensor，用于计算类内排名
+        arange_N = torch.arange(N, device=device).expand(B, -1) # [B, N]
+        
+        # `scatter_` 将排序后的索引放回原位，得到每个patch的全局排名
+        # `gather` 则根据原始顺序，找到每个patch的排序后位置
+        ranks_in_sorted_list = torch.empty_like(arange_N)
+        ranks_in_sorted_list.scatter_(1, sorted_indices, arange_N) # [B, N]
+
+        # 获取每个patch所属的类别
+        class_ids_sorted = torch.gather(class_ids, 1, sorted_indices) # [B, N]
+
+        # 通过比较排序后的类别ID，找到每个类别的起始位置
+        # diff非零的地方就是新类别的开始
+        class_boundaries = (class_ids_sorted[:, 1:] - class_ids_sorted[:, :-1]) != 0
+        
+        # 在每个类别的起始位置重置排名计数器
+        # 我们需要找到每个patch在其类别内的起始排名
+        # 使用cumsum来找到每个类别的起始全局排名
+        # [True, False, False, True, False] -> cumsum -> [1, 1, 1, 2, 2]
+        class_starts_rank = torch.nn.functional.pad(class_boundaries.cumsum(dim=1), (1, 0)) # [B, N]
+        
+        # 再次使用gather/scatter技巧找到每个类别的起始排名
+        class_starts_rank_unsorted = torch.empty_like(class_starts_rank)
+        class_starts_rank_unsorted.scatter_(1, sorted_indices, class_starts_rank) # [B, N]
+
+        # 全局排名 - 类别起始排名 = 类内排名
+        intra_class_rank = ranks_in_sorted_list - class_starts_rank_unsorted # [B, N]
+
+        # 5. 计算每个类别要保留的数量，并确定每个patch是否应该保留
+        class_one_hot = torch.nn.functional.one_hot(class_ids, num_classes=Q) # [B, N, Q]
+        num_per_class = class_one_hot.sum(dim=1) # [B, Q]
+        
+        # 获取每个patch对应的“其所属类别总数”
+        # [B,N] <- [B,Q] gather with [B,N] index
+        total_in_class_for_each_patch = torch.gather(num_per_class, 1, class_ids) # [B, N]
+
+        # 避免除以零
+        total_in_class_for_each_patch[total_in_class_for_each_patch == 0] = 1
+        
+        # 计算每个patch的分数百分位
+        percentile = (intra_class_rank + 1) / total_in_class_for_each_patch # [B, N]
+        
+        # 6. 生成最终的保留掩码
+        keep_mask = percentile <= keep_threshold # [B, N]
+
+
+        
+    # 7. **固定长度处理核心逻辑**
+        
+        # A. 找出所有要保留的像素的全局索引 (扁平化)
+        # kept_coords: [TotalKept, 2] -> [batch_indices, kept_indices]
+        kept_coords = keep_mask.nonzero(as_tuple=False)
+        batch_indices_flat, kept_indices_flat = kept_coords.unbind(dim=1)
+        
+        # B. 创建一个张量来存储最终的 N_fixed_pruned 个索引
+        final_kept_indices = torch.zeros((B, N_fixed_pruned), dtype=torch.long, device=device)
+        
+        # C. 填充/截断: 循环批次维度 (B)
+        # 注意：B通常很小 (如 16, 32)，这个循环开销极低，且操作是GPU并行的。
+        # 相比于前面复杂的向量化计算，这是最安全且高效的方式来处理批次内差异。
+        for b in range(B):
+            # 找到当前批次样本b的保留索引
+            indices_b = kept_indices_flat[batch_indices_flat == b]
+            num_kept_b = indices_b.numel()
+            
+            if num_kept_b > N_fixed_pruned:
+                # 截断 (Trimming): 随机丢弃多余的像素
+                # 随机打乱 indices_b，并取前 N_fixed_pruned 个
+                rand_perm = torch.randperm(num_kept_b, device=device)[:N_fixed_pruned]
+                final_kept_indices[b] = indices_b[rand_perm]
+                
+            elif num_kept_b < N_fixed_pruned:
+                # 填充 (Padding): 随机补充像素
+                # 从未保留的像素中随机选取来填充
+                
+                # 找出未保留的索引（需要额外的计算，这里我们简化，用重复填充）
+                # 实际操作中，为了避免信息重复，应该从**未保留**的像素中随机填充
+                # 但最简单且保证速度的方法是：用**任意值**填充，并在后续attention mask中屏蔽掉
+                
+                # 填充剩余数量的重复索引（简单但不太好）
+                num_padding = N_fixed_pruned - num_kept_b
+                padding_indices = indices_b[torch.randint(0, num_kept_b, (num_padding,), device=device)]
+                final_kept_indices[b] = torch.cat([indices_b, padding_indices], dim=0)
+
+            else:
+                final_kept_indices[b] = indices_b
+
+        # D. 使用最终的固定长度索引进行 gather
+        # final_kept_indices: [B, N_fixed_pruned]
+        
+        # 准备 gather 的索引形状 [B, N_fixed_pruned, C]
+        final_indices_expanded = final_kept_indices.unsqueeze(-1).expand(-1, -1, C)
+        
+        # 从原始 patches 中提取
+        pruned_patches = torch.gather(image_patches, 1, final_indices_expanded) # [B, N_fixed_pruned, C]
+        
+        # 这里的 `final_kept_indices` 包含了我们需要的 N_pruned 个索引
+        return pruned_patches, final_kept_indices # 返回的索引形状也简化了
+
+        
+
     def forward(self, x , queries , epoch):
         b, h, w, d = x.size()
         b,n,d = queries.size()
@@ -65,11 +196,13 @@ class MaskQKVLayer(nn.Module):
         现有
         assignment ： 现有一个shape为 b n q的分配矩阵
         queries : b q c
-        x : b n q
+        x : b n c
         p: 剪枝率 (1-p)保留率
 
         我需要：
-        二维位置编码。这个是否可以使用
+        二维位置编码。这个要抄一下MAE的，因为不能使用lepe等attention机制了
+        剪枝完毕后的X,这个应该怎么做？
+
         """
         ###################################################
 
