@@ -18,7 +18,7 @@ import time
 from typing import Tuple, Union
 from functools import partial
 from einops import einsum
-from .modules import Encoder,PatchExpand
+from .modules import Encoder,PatchExpand,DeconvUpsample
 
 from einops import rearrange
 
@@ -34,7 +34,7 @@ torch._dynamo.config.accumulated_cache_size_limit = 192
 
 class BiLevelRoutingAttention(nn.Module):
     """
-    n_win: number of windows in one side (so the actual number of windows is n_win*n_win)
+    ,mask_h = 7 , mask_w = 7  : mask的宽高
     kv_per_win: for kv_downsample_mode='ada_xxxpool' only, number of key/values per window. Similar to n_win, the actual number is kv_per_win*kv_per_win.
     topk: topk for window filtering
     param_attention: 'qkvo'-linear for q,k,v and o, 'none': param free attention
@@ -42,12 +42,11 @@ class BiLevelRoutingAttention(nn.Module):
     diff_routing: wether to set routing differentiable
     soft_routing: wether to multiply soft routing weights 
     """
-    def __init__(self, dim, num_heads=8, n_win=7, qk_dim=None, qk_scale=None, side_dwconv=3,
+    def __init__(self, dim, num_heads=8 , qk_dim=None, qk_scale=None, side_dwconv=3,
                  auto_pad=False):
         super().__init__()
         # local attention setting
         self.dim = dim
-        self.n_win = n_win  # Wh, Ww
         self.num_heads = num_heads
         self.qk_dim = qk_dim or dim
         assert self.qk_dim % num_heads == 0 and self.dim % num_heads==0, 'qk_dim and dim must be divisible by num_heads!'
@@ -64,17 +63,22 @@ class BiLevelRoutingAttention(nn.Module):
         q , k, v = self.project(x).split([self.dim , self.dim , self.dim] , dim = -1)
         return q, k,v
 
-    def forward(self, x, clstoken , mask):
+    def forward(self, x, clstoken , mask , mask_h , mask_w):
         """
         x: NHWC tensor
         clstoken : N Q C
-
+        mask : b Winnum Winnum
         Return:
             NHWC tensor
         """
         B , H , W , C = x.shape
-        _, num_q ,_ = clstoken.shape
-        h_w = H // self.n_win
+        _, num_q ,_ = clstoken.shape    
+        WinNum = mask_h * mask_w
+        assert WinNum == mask.shape[1]
+        Win_h = H // self.mask_h
+        Win_w = W // mask_w
+        WinPix = Win_h * Win_w
+
 
         # 首先先做了linear ， 变成q k v : b h w c 
         q , k , v = self.qkv(x)
@@ -91,9 +95,9 @@ class BiLevelRoutingAttention(nn.Module):
 
 
         # b (j h ) ( i w ) (Nh Hd)  -> b Nh (j i h w) Hd
-        q = rearrange(q,'b (j h ) ( i w ) (Nh Hd)  -> b Nh (j i h w) Hd' , j = self.n_win , i=self.n_win , Nh = self.num_heads)
-        k = rearrange(k,'b (j h ) ( i w ) (Nh Hd)  -> b Nh (j i h w) Hd' , j = self.n_win , i=self.n_win , Nh = self.num_heads)
-        v = rearrange(v,'b (j h ) ( i w ) (Nh Hd)  -> b Nh (j i h w) Hd' , j = self.n_win , i=self.n_win , Nh = self.num_heads)
+        q = rearrange(q,'b (j h ) ( i w ) (Nh Hd)  -> b Nh (j i h w) Hd' , j = mask_h , i=mask_w, Nh = self.num_heads)
+        k = rearrange(k,'b (j h ) ( i w ) (Nh Hd)  -> b Nh (j i h w) Hd' , j = mask_h  , i=mask_w , Nh = self.num_heads)
+        v = rearrange(v,'b (j h ) ( i w ) (Nh Hd)  -> b Nh (j i h w) Hd' , j = mask_h  , i=mask_w , Nh = self.num_heads)
 
         
         q_with_cls = torch.cat((q , q_cls) , dim=2)
@@ -102,8 +106,7 @@ class BiLevelRoutingAttention(nn.Module):
 
         def mask_mod(b , h , q_idx , kv_idx):
             # return (q_idx >= H*W) | (kv_idx >= H*W) | (mask[b ,q_idx - numq//(h_w * h_w) , kv_idx//(h_w * h_w) ]==1)
-            #因为不能使用逻辑语句， 所以只能在mask边缘添加一圈表示true ， 所以cls token目前只能使用一个了。
-            return mask[b ,q_idx //(h_w * h_w) , kv_idx//(h_w * h_w) ]==1 
+            return mask[b ,q_idx //WinPix , kv_idx//WinPix ]
         
         blockmask = create_block_mask(mask_mod , B = B , H = self.num_heads , Q_LEN= H*W+num_q , KV_LEN=H*W+num_q ,_compile=True)
 
@@ -114,7 +117,7 @@ class BiLevelRoutingAttention(nn.Module):
         clstoken = out[:,:,-num_q:,:]
         x = out[:,:,:-num_q,:]
 
-        x = rearrange(x ,'b Nh (j i h w) Hd -> b (j h ) (i w ) ( Nh Hd) ' , Nh = self.num_heads , j = self.n_win , i = self.n_win , h = h_w , w = h_w).contiguous()
+        x = rearrange(x ,'b Nh (j i h w) Hd -> b (j h ) (i w ) ( Nh Hd) ' , Nh = self.num_heads , j =mask_h , i = self.mask_w , h = Win_h , w = Win_w).contiguous()
 
         clstoken = rearrange(clstoken , 'b  Nh  q  c -> b q (Nh  c)')
 
@@ -149,32 +152,34 @@ class AttentionLePE(nn.Module):
         """
         Args:
             x: tensor of shape [B, H, W, C]
-            cls_token: tensor of shape [B, 1, C]
+            cls_token: tensor of shape [B, Nq , C]
         Returns:
             x_out: [B, H, W, C]
-            cls_out: [B, 1, C]
+            cls_out: [B, Nq , C]
         """
         B, H, W, C = x.shape
         x_seq = rearrange(x, 'b h w c -> b (h w) c')   # [B, N, C]
-        N = x_seq.size(1)
+        N = H*W
+        Nq = cls_token.shape[1]
 
         # concat cls token with patch tokens
         x_cat = torch.cat([cls_token, x_seq], dim=1)  # [B, 1+N, C]
 
         # qkv projection
-        qkv = self.qkv(x_cat).reshape(B, 1 + N, 3, self.num_heads, C // self.num_heads)
+        qkv = self.qkv(x_cat).reshape(B, Nq + N, 3, self.num_heads, C // self.num_heads)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]  # [B, heads, 1+N, C//heads]
 
         # attention
+        # b h N c
         attnMap = (q @ k.transpose(-2, -1)) * self.scale
         attn = attnMap.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
-        out = (attn @ v).transpose(1, 2).reshape(B, 1 + N, C)  # [B, 1+N, C]
+        out = (attn @ v).transpose(1, 2).reshape(B, N+Nq, C)  # [B, 1+N, C]
 
         # split cls and patch outputs
-        cls_out, x_out = out[:, :1, :], out[:, 1:, :]
+        cls_out, x_out = out[:, :Nq, :], out[:, Nq:, :]
 
         # add lepe only to patch tokens
         lepe = self.lepe(rearrange(x, 'b h w c -> b c h w'))
@@ -197,10 +202,10 @@ class AttentionLePE(nn.Module):
             return x_out, cls_out
 
 
-class Block(nn.Module):
-    def __init__(self , dim , drop_path=0 , num_heads=8, n_win=7, topk = 4 ,mlp_ratio = 3 ):
+class BiBlock(nn.Module):
+    def __init__(self , dim , drop_path=0 , num_heads=8, topk = 4 ,mlp_ratio = 3 , ):
         super().__init__()
-        self.attn = BiLevelRoutingAttention()
+        self.attn = BiLevelRoutingAttention(dim , num_heads , topk = topk )
         
         self.pos_embed = nn.Conv2d(dim, dim,  kernel_size=3, padding=1, groups=dim)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -213,13 +218,15 @@ class Block(nn.Module):
         self.norm1 = nn.LayerNorm(dim, eps=1e-6)
 
         pass
-    def forwards(self , x , clstoken , mask): 
+
+    def forwards(self , x , clstoken , mask , mask_h , mask_w): 
+        # b h w c
         resX = x + self.pos_embed(x)
         resC = clstoken
 
         x = self.norm1(x)
         clstoken = self.norm1(clstoken)
-        x , clstoken = self.attn(x , clstoken , mask)
+        x , clstoken = self.attn(x , clstoken , mask , mask_h , mask_w)
 
         x = self.drop_path(x) + resX
         clstoken = resC + clstoken
@@ -233,53 +240,107 @@ class Block(nn.Module):
         x = self.drop_path(x) + resX
         clstoken = clstoken + resC
 
-
-
-        
-        # x = x + self.drop_path(self.attn(self.norm1(x))) # (N, H, W, C)
-        # x = x + self.drop_path(self.mlp(self.norm2(x))) # (N, 
         return x , clstoken
 
 
-class Layer(nn.Module):
-    def __init__(self,inputh,inputw , depth , topk , dim ):
+class BiLayer(nn.Module):
+    def __init__(self, embed_dim ,out_dim, depth ,num_heads,ffn_dim , topk = 3,  drop_path=0 ,upsample =PatchExpand  ):
         super().__init__()
-        self.upsample = PatchExpand((inputh,inputw),2)
         self.blocks = nn.Sequential()
-        self.clsLinear = nn.Linear(dim //2 , dim)
+        self.topk = topk
         for i in range(depth):
-            self.blocks.append(Block())
+            self.blocks.append(BiBlock(embed_dim , drop_path , num_heads ,ffn_dim))
+
+        if upsample is not None:
+            self.upsample = upsample(dim=embed_dim, out_dim=out_dim, )
+            self.queriesLinear = nn.Linear(embed_dim , out_dim)
+            self.queriesNorm = nn.LayerNorm(out_dim)
+        else:
+            self.upsample = None
+            self.queriesLinear = None
 
         pass
-    def forward(self , x , clstoken , skip , mask):
-        x = self.upsample(x)
-        clstoken = self.clsLinear(clstoken)
-        x = x + skip
-        x , clstoken = self.blocks(x, clstoken , mask)
+    def forward(self , x , clstoken , attentionMap , mask_h , mask_w):
+
+        B,H,W,C = x.shape
+        _,winNum,_ = attentionMap.shape
+        _,numq,_ = clstoken.shape
+        winPix =( H//mask_h ) * (W//mask_w) 
+
+        _, top_k_indices = torch.topk(attentionMap, self.topk, dim=-1)
+        imgMask = torch.zeros_like(top_k_indices, dtype=torch.bool , device=x.device,requires_grad=False)
+        imgMask.scatter_(-1, top_k_indices, True)
+
+        cls_MaskNum = math.ceil(numq / winPix)
+        mask = torch.ones(B,winNum + cls_MaskNum , winNum +cls_MaskNum,dtype=torch.bool,device=x.device)
+        mask[:,:winNum , :winNum , :] = imgMask
+
+        for block in self.blocks:
+            x , clstoken = block(x , clstoken,mask)
         
+        if self.upsample is not None :
+            x = self.upsample(x)
+            queries = self.queriesLinear(queries)
+            queries = self.queriesNorm(queries)
+
         return x , clstoken  
 
 
+""""
+embed_dim= embed_dims[i_layer],
+out_dim=embed_dims[i_layer+1],
+depth=depths[i_layer],
+ls_init_value = None,
+res_scale = True,
+num_heads=num_heads[i_layer],
+mlp_ratio=mlp_ratios[i_layer],
+dpr=dpr[sum(depths[:i_layer]):sum(depths
+[:i_layer + 1])],
+upsample= PatchExpand ,
+"""
 
-    
-class BasicLayer(nn.Module):
-    def __init__(self,w , depth , topk , dim ):
+class SimpleLayer(nn.Module):
+    def __init__(self, embed_dim ,out_dim, depth ,num_heads,ffn_dim,  drop_path=0 ,upsample =PatchExpand ):
         super().__init__()
         self.blocks = nn.Sequential()
         for i in range(depth):
-            self.blocks.append(Block())
-
-        pass
+            self.blocks.append(SimpleBlock(embed_dim , drop_path , num_heads ,ffn_dim))
+        # patch merging layer
+        if upsample is not None:
+            self.upsample = upsample(dim=embed_dim, out_dim=out_dim, )
+            self.queriesLinear = nn.Linear(embed_dim , out_dim)
+            self.queriesNorm = nn.LayerNorm(out_dim)
+        else:
+            self.upsample = None
+            self.queriesLinear = None
+    """
+    输入
+    x : b h w c
+    # 这一层什么都不用做，只需要按顺序给他们做attention就好，最好一层返回attentionMap
+    还要上采样
+    """
     def forward(self , x , clstoken ):
-        x , clstoken = self.blocks(x, clstoken)
-        return x , clstoken  
+        for index , block in self.blocks:
+            if index != -1 :
+                x , clstoken = block(x, clstoken , retMap = False)
+            else :
+                x , clstoken , attentionMap = block(x , clstoken , retMap = True)
+
+        if self.upsample is not None :
+            x = self.upsample(x)
+            queries = self.queriesLinear(queries)
+            queries = self.queriesNorm(queries)
+
+        return x , clstoken  , attentionMap
 
     
-class BasicBlock(nn.Module):
-    def __init__(self , dim , drop_path=0 , num_heads=8, n_win=7, topk = 4 ,mlp_ratio = 3  , retAttnMap = False ):
+
+
+
+class SimpleBlock(nn.Module):
+    def __init__(self , dim , drop_path=0 , num_heads=8, ffn_dim = 3  ):
         super().__init__()
-        self.attn = AttentionLePE()
-        self.retAttnMap = retAttnMap
+        self.attn = AttentionLePE(dim = dim , num_heads=num_heads , attn_drop=attn_drop )
         
         self.pos_embed = nn.Conv2d(dim, dim,  kernel_size=3, padding=1, groups=dim)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -290,14 +351,22 @@ class BasicBlock(nn.Module):
                                  nn.Linear(int(mlp_ratio*dim), dim)
                                 )
         self.norm1 = nn.LayerNorm(dim, eps=1e-6)
+
         pass
-    def forwards(self , x , clstoken ): 
+
+    def forward(self , x , clstoken , retAttnMap=False ):
+        """""
+        x : b h w c 
+        token : b q c 
+        """
+        # 下面这一堆非常恶心的东西都是因为存在这个傻逼cls cls token ， 以及一堆要使用lepe做位置编码的傻逼东西。如果不适用lepe的话。可能会好些一点？
         resX = x + self.pos_embed(x)
         resC = clstoken
 
         x = self.norm1(x)
         clstoken = self.norm1(clstoken)
-        if self.retAttnMap:
+
+        if retAttnMap:
             x , clstoken , attnMap = self.attn(x , clstoken ,True )
         else:
             x , clstoken  = self.attn(x , clstoken )
@@ -314,8 +383,8 @@ class BasicBlock(nn.Module):
         x = self.drop_path(x) + resX
         clstoken = clstoken + resC
 
-        if self.retAttnMap :
-            return x , clstoken , attnMap
+        if retAttnMap :
+            return x , clstoken , attnMap.detech()
         else:
             return x , clstoken
 
@@ -326,7 +395,7 @@ class BiUnet(nn.Module):
                  patch_norm=True, use_checkpoints=[False, False, False, False], chunkwise_recurrents=[True, True, False, False], projection=1024,
                  layerscales=[False, False, False, False], layer_init_values=1e-6 ):
         super().__init__()
-
+        
         self.num_classes = num_classes
         self.num_layers = len(depths)
         self.embed_dim = embed_dims[0]
@@ -336,11 +405,45 @@ class BiUnet(nn.Module):
         # self.q = nn.Parameter(torch.randn(1, num_q, self.embed_dim) * 0.02)
         self.encoder =  Encoder(in_chans=in_chans, embed_dim=embed_dims,
             norm_layer=norm_layer if self.patch_norm else None)
-        # self.up = nn.UpsamplingBilinear2d(scale_factor=2)
-        self.up = nn.ModuleList()
-        for i in range(3):
-            self.up.append(PatchExpand((224,224) ,embed_dims[-(i+1)] , 2))
-        self.up.append(nn.Identity())
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
+        #FIXME:
+        
+        self.layers = nn.ModuleList()
+        for i_layer in range(self.num_layers):
+            if i_layer == 0:
+                self.layers.append(
+                    SimpleLayer(
+                    embed_dim=embed_dims[i_layer],
+                    out_dim=embed_dims[i_layer+1] if (i_layer < self.num_layers - 1) else None,
+                    depth=depths[i_layer],
+                    num_heads=num_heads[i_layer],
+                    ffn_dim=int(mlp_ratios[i_layer]*embed_dims[i_layer]),
+                    drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                    norm_layer=norm_layer,
+                    downsample= DeconvUpsample if (i_layer < self.num_layers - 1) else None,
+                    )
+                )
+            else:
+
+                self.layers.append(
+                    BiLayer(
+                    embed_dim=embed_dims[i_layer],
+                    out_dim=embed_dims[i_layer+1] if (i_layer < self.num_layers - 1) else None,
+                    depth=depths[i_layer],
+                    num_heads=num_heads[i_layer],
+                    ffn_dim=int(mlp_ratios[i_layer]*embed_dims[i_layer]),
+                    drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                    norm_layer=norm_layer,
+                    downsample= DeconvUpsample if (i_layer < self.num_layers - 1) else None,
+                    )
+                )
+
+        # for i in range(3):
+        #     self.up.append(PatchExpand((224,224) ,embed_dims[-(i+1)] , 2))
+        
+        # self.up.append(nn.Identity())
+        self.num_q = 8
+        self.clsToken_embedding = nn.Parameter(torch.randn(1, self.num_q, self.embed_dim) * 0.02)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -363,17 +466,41 @@ class BiUnet(nn.Module):
         return {'relative_position_bias_table'}
     
     def forward(self, x):
+        # FIXME：这里要求x的长宽至少能除以32，如果不能的话就要加padding , 以及shape
+        b  ,c , h , w= x.shape
+        # x : b h/32 , w/32 ,c
+        # featrues : None , 1/16 ....
         x , features = self.encoder(x)
-        # append cls token : x : b 1+hw , c
-        for i in range(4):
-            #输入： x , skip
-            x = self.stage[i](x , features[i] , attentionMap)
-            x = self.up(x)
+        clstokens = self.clsToken_embedding.expand(b , -1 , -1)
         
-        # b , 1 , c
-        clstoken = x[:,0,:]
-        clstoken = clstoken.squeeze(1)
-        res = self.head(clstoken)
+        tokens_result = []
+
+        
+        x , clstokens , attentionMap = self.layers[0](x , clstokens)
+        tokens_result.append(clstokens)
+        #处理一下attentionmap
+        """"
+        attentionMap shape : b h q+N q+N
+        首先先按h平均一下
+        b q+N q+N
+        然后取出后面N个
+
+        """
+        mask_h = h //32 
+        mask_w = w //32 
+        assert mask_h == x.shape[1]
+        assert mask_w == x.shape[2]
+
+
+        attentionMap = torch.mean(attentionMap , dim=1)
+        attentionMap = attentionMap[:,self.num_q: , self.num_q:]
+
+        for i in range(1,4):
+            x = x + features[i]
+            x , clstokens = self.layers[i](x , clstokens , attentionMap)
+            tokens_result.append(clstokens)
+
+        res = self.head(tokens_result)
         return res
         
 
