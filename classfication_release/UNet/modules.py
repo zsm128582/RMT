@@ -12,7 +12,7 @@ from timm.models.layers import DropPath, trunc_normal_
 from timm.models.vision_transformer import VisionTransformer
 from timm.models.registry import register_model
 from timm.models.vision_transformer import _cfg
-from fvcore.nn import FlopCountAnalysis, flop_count_table
+# from fvcore.nn import FlopCountAnalysis, flop_count_table
 import time
 from typing import Tuple, Union
 from functools import partial
@@ -22,18 +22,18 @@ from einops import rearrange
 
 # 定义反卷积上采样模块
 class DeconvUpsample(nn.Module):
-    def __init__(self, input_dim, output_dim):
+    def __init__(self, inputdim, outputdim):
         super().__init__()
         # 反卷积层：输入通道input_dim，输出通道output_dim， kernel=4, stride=2, padding=1
         # 该参数组合可实现2倍上采样（h和w各扩大2倍）
         self.deconv = nn.ConvTranspose2d(
-            in_channels=input_dim,
-            out_channels=output_dim,
+            in_channels=inputdim,
+            out_channels=outputdim,
             kernel_size=4,
             stride=2,
             padding=1
         )
-        self.norm = nn.BatchNorm2d(output_dim)
+        self.norm = nn.BatchNorm2d(outputdim)
     
     def forward(self, x):
         # 输入x形状：[b, h, w, c]（通道在后）
@@ -113,9 +113,9 @@ class Encoder(nn.Module):
         #input bchw
         features = []
         x = self.proj[0](x)
-        for i in range(len(self.embed_dim)):
+        for i in range(1,len(self.proj)):
             x = self.activate(x)
-            x = self.proj[i+1](x)
+            x = self.proj[i](x)
             features.append(x.permute(0,2,3,1))
         # return bhwc
         # featrues : 1/4 , 1/8 , 1/16 , 1/32 

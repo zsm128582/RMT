@@ -74,6 +74,8 @@ use_gumbel_softmax = [
 ]
 
 
+
+
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
     parser.add_argument('--early-conv', action='store_true')
@@ -299,10 +301,20 @@ def main(args):
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
     print(f"Creating model: {args.model}")
-   
+    
     model = archs[args.model](args)
     
     print(model)
+    # input = torch.randn(1, 3, 128, 128,device = device)
+    # from thop import profile
+    # model.to(device)
+    # flops, params = profile(model, inputs=(input, ))
+    # print('flops:{}'.format(flops))
+    # print('params:{}'.format(params))
+
+
+    # from torchsummary import summary
+    # summary(model.to(device), input_size=(3, 224, 224), batch_size=-1)
     # model.eval()
     # flops = FlopCountAnalysis(model, torch.rand(1, 3, args.input_size, args.input_size))
     # print(flop_count_table(flops))
@@ -345,7 +357,7 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
