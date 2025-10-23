@@ -43,6 +43,7 @@ from Biformer.Biformer import biformer_tiny
 from TokenAttention.segmentBackbone import tokenNet_t
 from TokenGalerkinAttention.segmentBackbone import tokenGalerkin_t
 from UNet.BiUnet import BiUnet_t
+from conv_tokenGalerkin.segmentBackbone import convTokenGalerkin_t
 archs = {
             # 'RMT_T': RMT_T3,
             # 'RMT_S': RMT_S,
@@ -60,7 +61,8 @@ archs = {
             'biformer_t':biformer_tiny,
             'tokenNet_t':tokenNet_t,
             'tokenGalerkin_t' : tokenGalerkin_t,
-            "BiUnet_t":BiUnet_t
+            "BiUnet_t":BiUnet_t,
+            "convTokenGalerkin_t":convTokenGalerkin_t
             # 'Restormer' : Restormer_default,
             # 'Utentive' : Utentive_default,
             # 'Half' : HalfRestomer_defalt

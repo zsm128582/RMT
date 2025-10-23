@@ -17,9 +17,9 @@ from .RMT_Swin import RMT_Swin
 # from .TNT.TNT import TNT
 from .SegNet.segmentBackbone import VisSegNet
 from .SegNet_conv.segmentBackbone import VisSegNet_conv
-
+from .BiUnet.BiUnet import BiUnet
 __all__ = [
     'ResNet', 'ResNetV1c', 'ResNetV1d', 'ResNeXt', 'HRNet', 'FastSCNN',
     'ResNeSt', 'MobileNetV2', 'UNet', 'CGNet', 'MobileNetV3',
-    'VisionTransformer', 'EfficientViT', 'FAT', 'RMT', 'RMT_Swin','VisSegNet','VisSegNet_conv'
+    'VisionTransformer', 'EfficientViT', 'FAT', 'RMT', 'RMT_Swin','VisSegNet','VisSegNet_conv','BiUnet'
 ]
