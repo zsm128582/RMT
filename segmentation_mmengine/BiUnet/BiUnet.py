@@ -391,7 +391,7 @@ class SimpleBlock(nn.Module):
             return x , clstoken
 
 
-from mmdet.registry import MODELS as MODELS_MMDET
+# from mmdet.registry import MODELS as MODELS_MMDET
 from mmseg.registry import MODELS as MODELS_MMSEG
 from mmengine.runner import load_checkpoint
 from mmseg.models.builder import BACKBONES

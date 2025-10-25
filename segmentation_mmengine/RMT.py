@@ -482,7 +482,7 @@ class PatchEmbed(nn.Module):
         x = self.proj(x).permute(0, 2, 3, 1) #(b h w c)
         return x
 
-from mmdet.registry import MODELS as MODELS_MMDET
+# from mmdet.registry import MODELS as MODELS_MMDET
 from mmseg.registry import MODELS as MODELS_MMSEG
 from mmengine.runner import load_checkpoint
 from mmseg.models.builder import BACKBONES
