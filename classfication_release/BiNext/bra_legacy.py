@@ -113,8 +113,9 @@ class QKVLinear(nn.Module):
         self.qkv = nn.Linear(dim, qk_dim + qk_dim + dim, bias=bias)
     
     def forward(self, x):
-        q, k , v = self.qkv(x).split([self.qk_dim, self.qk_dim , self.dim], dim=-1)
-        return q, k , v
+        return self.qkv(x)
+        # q, k , v = self.qkv(x).split([self.qk_dim, self.qk_dim , self.dim], dim=-1)
+        # return q, k , v
         # q, k, v = self.qkv(x).split([self.qk_dim, self.qk_dim, self.dim], dim=-1)
         # return q, k, v
 
@@ -152,19 +153,19 @@ class BiLevelRoutingAttention(nn.Module):
         self.diff_routing = diff_routing
         self.soft_routing = soft_routing
         # router
-        assert not (self.param_routing and not self.diff_routing) # cannot be with_param=True and diff_routing=False
-        self.router = TopkRouting(qk_dim=self.qk_dim,
-                                  qk_scale=self.scale,
-                                  topk=self.topk,
-                                  diff_routing=self.diff_routing,
-                                  param_routing=self.param_routing)
+        # assert not (self.param_routing and not self.diff_routing) # cannot be with_param=True and diff_routing=False
+        # self.router = TopkRouting(qk_dim=self.qk_dim,
+        #                           qk_scale=self.scale,
+        #                           topk=self.topk,
+        #                           diff_routing=self.diff_routing,
+        #                           param_routing=self.param_routing)
         if self.soft_routing: # soft routing, always diffrentiable (if no detach)
             mul_weight = 'soft'
         elif self.diff_routing: # hard differentiable routing
             mul_weight = 'hard'
         else:  # hard non-differentiable routing
             mul_weight = 'none'
-        self.kv_gather = KVGather(mul_weight=mul_weight)
+        # self.kv_gather = KVGather(mul_weight=mul_weight)
 
         # qkv mapping (shared by both global routing and local attention)
         self.param_attention = param_attention
@@ -177,41 +178,44 @@ class BiLevelRoutingAttention(nn.Module):
         else:
             raise ValueError(f'param_attention mode {self.param_attention} is not surpported!')
         
-        self.kv_downsample_mode = kv_downsample_mode
-        self.kv_per_win = kv_per_win
-        self.kv_downsample_ratio = kv_downsample_ratio
-        self.kv_downsample_kenel = kv_downsample_kernel
-        if self.kv_downsample_mode == 'ada_avgpool':
-            assert self.kv_per_win is not None
-            self.kv_down = nn.AdaptiveAvgPool2d(self.kv_per_win)
-        elif self.kv_downsample_mode == 'ada_maxpool':
-            assert self.kv_per_win is not None
-            self.kv_down = nn.AdaptiveMaxPool2d(self.kv_per_win)
-        elif self.kv_downsample_mode == 'maxpool':
-            assert self.kv_downsample_ratio is not None
-            self.kv_down = nn.MaxPool2d(self.kv_downsample_ratio) if self.kv_downsample_ratio > 1 else nn.Identity()
-        elif self.kv_downsample_mode == 'avgpool':
-            assert self.kv_downsample_ratio is not None
-            self.kv_down = nn.AvgPool2d(self.kv_downsample_ratio) if self.kv_downsample_ratio > 1 else nn.Identity()
-        elif self.kv_downsample_mode == 'identity': # no kv downsampling
-            self.kv_down = nn.Identity()
-        elif self.kv_downsample_mode == 'fracpool':
-            # assert self.kv_downsample_ratio is not None
-            # assert self.kv_downsample_kenel is not None
-            # TODO: fracpool
-            # 1. kernel size should be input size dependent
-            # 2. there is a random factor, need to avoid independent sampling for k and v 
-            raise NotImplementedError('fracpool policy is not implemented yet!')
-        elif kv_downsample_mode == 'conv':
-            # TODO: need to consider the case where k != v so that need two downsample modules
-            raise NotImplementedError('conv policy is not implemented yet!')
-        else:
-            raise ValueError(f'kv_down_sample_mode {self.kv_downsaple_mode} is not surpported!')
+        # self.kv_downsample_mode = kv_downsample_mode
+        # self.kv_per_win = kv_per_win
+        # self.kv_downsample_ratio = kv_downsample_ratio
+        # self.kv_downsample_kenel = kv_downsample_kernel
+        # if self.kv_downsample_mode == 'ada_avgpool':
+        #     assert self.kv_per_win is not None
+        #     self.kv_down = nn.AdaptiveAvgPool2d(self.kv_per_win)
+        # elif self.kv_downsample_mode == 'ada_maxpool':
+        #     assert self.kv_per_win is not None
+        #     self.kv_down = nn.AdaptiveMaxPool2d(self.kv_per_win)
+        # elif self.kv_downsample_mode == 'maxpool':
+        #     assert self.kv_downsample_ratio is not None
+        #     self.kv_down = nn.MaxPool2d(self.kv_downsample_ratio) if self.kv_downsample_ratio > 1 else nn.Identity()
+        # elif self.kv_downsample_mode == 'avgpool':
+        #     assert self.kv_downsample_ratio is not None
+        #     self.kv_down = nn.AvgPool2d(self.kv_downsample_ratio) if self.kv_downsample_ratio > 1 else nn.Identity()
+        # elif self.kv_downsample_mode == 'identity': # no kv downsampling
+        #     self.kv_down = nn.Identity()
+        # elif self.kv_downsample_mode == 'fracpool':
+        #     # assert self.kv_downsample_ratio is not None
+        #     # assert self.kv_downsample_kenel is not None
+        #     # TODO: fracpool
+        #     # 1. kernel size should be input size dependent
+        #     # 2. there is a random factor, need to avoid independent sampling for k and v 
+        #     raise NotImplementedError('fracpool policy is not implemented yet!')
+        # elif kv_downsample_mode == 'conv':
+        #     # TODO: need to consider the case where k != v so that need two downsample modules
+        #     raise NotImplementedError('conv policy is not implemented yet!')
+        # else:
+        #     raise ValueError(f'kv_down_sample_mode {self.kv_downsaple_mode} is not surpported!')
 
         # softmax for local attention
         self.attn_act = nn.Softmax(dim=-1)
 
         self.auto_pad=auto_pad
+
+        self.poolAct = nn.GELU()
+        self.poolNorm = nn.LayerNorm(dim*3)
 
     def forward(self, x, ret_attn_mask=False):
         """
@@ -246,22 +250,49 @@ class BiLevelRoutingAttention(nn.Module):
         # q: (n, p^2, w, w, c_qk)
         # kv: (n, p^2, w, w, c_qk+c_v)
         # NOTE: separte kv if there were memory leak issue caused by gather
-        q, k , v = self.qkv(x) 
-
+        # q , k , v = self.qkv(x) 
+        qkv = self.qkv(x)
         # pixel-wise qkv
         # q_pix: (n, p^2, w^2, c_qk)
         # kv_pix: (n, p^2, h_kv*w_kv, c_qk+c_v)
-        q_pix = rearrange(q, 'n p2 h w c -> n p2 (h w) c')
-        k_pix = rearrange(k, 'n p2 h w c -> n p2 (h w) c')
-        v_pix = rearrange(v, 'n p2 h w c -> n p2 (h w) c')
 
-        q_win = q.mean([2, 3])
-        k_win = k.mean([2,3])
-        v_win = v.mean([2,3]) # window-wise qk, (n, p^2, c_qk), (n, p^2, c_qk)
 
+        
+
+        # 这个修改成GELU-pool
+        # q_win = self.poolAct(q)
+        # k_win = self.poolAct(k)
+        # v_win = self.poolAct(v)
+        qkv_win = self.poolAct(qkv)
+
+        # q_win = q_win.mean([2,3])
+        # k_win = k_win.mean([2,3])
+        # v_win = v_win.mean([2,3]) # window-wise qk, (n, p^2, c_qk), (n, p^2, c_qk)
+        qkv_win = qkv_win.mean([2,3])
+
+
+        # q_win = self.poolNorm(q_win)
+        # k_win = self.poolNorm(k_win)
+        # v_win = self.poolNorm(v_win)
+        #为了数值稳定性，nn.LayerNorm 在内部计算时（尤其是在混合精度训练中）通常会将其输入（即便是 FP16）上转型 (upcast) 到 torch.float32 (FP32) 来进行均值和方差的计算，并且其输出默认也是 FP32。为了一起做self attention ，需要将其转换回原来的type
+        original_dtype = qkv.dtype
+        qkv_win = self.poolNorm(qkv_win)
+        qkv_win = qkv_win.to(original_dtype)
+        
+        # 在这之前可以将qkv都放在一起，做完以后再chunk
+        qkv = rearrange(qkv, 'n p2 h w c -> n p2 (h w) c').contiguous()
+        q_pix,k_pix,v_pix = qkv.chunk(3, dim=-1)
+
+        q_win,k_win,v_win = qkv_win.chunk(3,-1)
+
+
+        # q_pix = rearrange(q, 'n p2 h w c -> n p2 (h w) c')
+        #  = rearrange(k, 'n p2 h w c -> n p2 (h w) c')
+        #  = rearrange(v, 'n p2 h w c -> n p2 (h w) c')
         ##################side_dwconv(lepe)##################
         # NOTE: call contiguous to avoid gradient warning when using ddp
-        lepe = self.lepe(rearrange(v, 'n (j i) h w c -> n c (j h) (i w)', j=self.n_win, i=self.n_win).contiguous())
+        lepe = self.lepe(rearrange(v_pix, 'n (j i) (h w) c -> n c (j h) (i w)', j=self.n_win, i=self.n_win , h =winLength).contiguous())
+
         lepe = rearrange(lepe, 'n c (j h) (i w) -> n (j h) (i w) c', j=self.n_win, i=self.n_win)
 
 
@@ -290,11 +321,24 @@ class BiLevelRoutingAttention(nn.Module):
 
 
         attn_logit = (q_win*self.scale) @ k_win.transpose(-2, -1)
+        
+        # 1. 获取 Top-K 掩码
         _, top_k_indices = torch.topk(attn_logit, self.topk, dim=-1)
-        mask = torch.zeros_like(attn_logit, dtype=torch.bool , device=q_pix.device)
+        # 注意：这里使用了 attn_logit.device，这通常更健壮
+        mask = torch.zeros_like(attn_logit, dtype=torch.bool, device=attn_logit.device)
         mask.scatter_(-1, top_k_indices, True)
+        
+        # 2. 创建对角线掩码
+        # 获取最后两个维度的大小
+        H_dim, W_dim = attn_logit.shape[-2], attn_logit.shape[-1]
+        # 创建一个对角线为 True 的掩码
+        diag_mask = torch.eye(H_dim, W_dim, dtype=torch.bool, device=attn_logit.device)
+        
+        # 3. 合并两个掩码 (逻辑或)
+        # diag_mask (H_dim, W_dim) 会自动广播以匹配 mask (..., H_dim, W_dim)
+        mask = mask | diag_mask
 
-        win_mask = torch.ones((B , winNum , math.ceil(winNum / winPix) ),dtype=torch.bool ,device=q_pix.device)
+        win_mask = torch.ones((B , winNum , math.ceil(winNum / winPix) ),dtype=torch.bool ,device=attn_logit.device)
         # mask : b p2 p2 
         mask = torch.cat( (mask ,win_mask) , dim= 2)
 
@@ -307,11 +351,13 @@ class BiLevelRoutingAttention(nn.Module):
         #这里需要分完头的QKV
 
         Q = rearrange(q_pix , 'b p2 n (m c) -> b m (p2 n) c',m =self.num_heads).contiguous()
+
         k_pix = rearrange(k_pix , 'b p2 w c -> b (p2 w) c')
         v_pix = rearrange(v_pix , 'b p2 w c -> b (p2 w) c')
 
         K = torch.cat((k_pix , k_win) , dim= 1)
         V = torch.cat((v_pix , v_win) , dim = 1)
+        # 分头
         K = rearrange(K , 'b n (m c) -> b m n c' , m = self.num_heads).contiguous()
         V = rearrange(V , 'b n (m c) -> b m n c' , m = self.num_heads).contiguous()
 

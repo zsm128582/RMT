@@ -1,11 +1,12 @@
 default_scope = 'mmseg'
-
+# resume = True
+# load_from="/home/zengshimao/code/RMT/segmentation_mmengine/work_dirs/engineVersion/iter_24000.pth"
 default_hooks = dict(
     timer=dict(type='IterTimerHook'),
     # 改成 iterbase 
     logger=dict(type='LoggerHook', log_metric_by_epoch = False , interval=100),
     param_scheduler=dict(type='ParamSchedulerHook'),
-    checkpoint=dict(type='CheckpointHook', by_epoch = False, interval=8000),
+    checkpoint=dict(type='CheckpointHook', by_epoch = False, interval=8000*4),
     sampler_seed=dict(type='DistSamplerSeedHook'),
     visualization=dict(type='SegVisualizationHook'))
 env_cfg = dict(
@@ -101,8 +102,24 @@ file_client_args = dict(backend='disk')
 train_pipeline = [
     dict(type='LoadImageFromFile', file_client_args=file_client_args),
     dict(reduce_zero_label=True, type='LoadAnnotations'),
-    dict(type='Resize', scale=(2048, 512), keep_ratio=True),
-    dict(type='RandomCrop', crop_size=(512, 512), cat_max_ratio=0.75),
+    # dict(type='Resize', scale=(2048, 512), keep_ratio=True),
+    dict(
+    keep_ratio=True,
+    ratio_range=(
+        0.5,
+        2.0,
+    ),
+    scale=(
+        2048,
+        512,
+    ),
+    type='RandomResize'),
+
+    dict(
+        cat_max_ratio=0.75, crop_size=(
+            512,
+            512,
+        ), type='RandomCrop'),
     dict(type='RandomFlip', prob=0.5),
     dict(type='PhotoMetricDistortion'),
     # dict(
@@ -157,8 +174,8 @@ train_dataloader = dict(
         type=dataset_type,
         data_root=data_root,
         data_prefix=dict(
-            img_path='images/validation',
-            seg_map_path='annotations/validation'),
+            img_path='images/training',
+            seg_map_path='annotations/training'),
         # filter_cfg=dict(filter_empty_gt=True, min_size=32),
         pipeline=train_pipeline))
 
@@ -286,6 +303,7 @@ model = dict(
             57.375,
         ],
         type='SegDataPreProcessor'),
+
     decode_head=dict(
         align_corners=False,
         channels=512,
@@ -313,6 +331,10 @@ model = dict(
             6,
         ),
         type='UPerHead'),
+
+
+
+
     pretrained=None,
     test_cfg=dict(mode='whole'),
     train_cfg=dict(),

@@ -19,9 +19,6 @@ from torch.nn.attention.flex_attention import (
 flex_attention = torch.compile(flex_attention, dynamic=True)
 torch._dynamo.config.cache_size_limit = 192
 torch._dynamo.config.accumulated_cache_size_limit = 192
-# For Seg :
-# from mmcv_custom import load_checkpoint
-# from mmseg.utils import get_root_logger
 
 
 # from mmengine.model import BaseModule

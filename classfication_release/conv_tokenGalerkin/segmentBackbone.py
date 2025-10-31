@@ -215,7 +215,7 @@ class TokenAttentionLayer(nn.Module):
 
 
         for index , blk in enumerate(self.blocks):
-            queries , keys = blk(queries = queries , keys = keys , query_pe = queries_embedding , key_pe = image_pos)
+            queries , keys = blk(queries , keys ,  queries_embedding , image_pos)
         
         queries = queries + queries_embedding
         x = keys + x

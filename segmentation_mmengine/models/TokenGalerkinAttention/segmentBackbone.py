@@ -219,12 +219,13 @@ class TokenAttentionLayer(nn.Module):
         queries = queries + queries_embedding
         x = keys + x
         x = rearrange(x , 'b (h w ) c -> b c h w' , h = h).contiguous()
-
+ 
         if self.downsample is not None:
-            x = self.downsample(x)
+            x_down = self.downsample(x)
             queries = self.queriesLinear(queries)
-
-        return x , queries
+        else:
+            x_down = x
+        return x_down , x , queries
     
 
 
@@ -1055,22 +1056,30 @@ class ConvLayer(nn.Module):
         
             
         return x , queries
+    
+from mmdet.registry import MODELS as MODELS_MMDET
+from mmseg.registry import MODELS as MODELS_MMSEG
+from mmengine.runner import load_checkpoint
+from mmseg.models.builder import BACKBONES
+from mmengine.model import BaseModule
+# from mmseg.utils import get_root_logger
+@MODELS_MMSEG.register_module()
+class ProbeNet(BaseModule):
 
-class VisSegNet(nn.Module):
-
-    def __init__(self, in_chans=3, num_classes=1000,
+    def __init__(self, in_chans=3, out_indices = (0,1,2,3),
                  embed_dims=[96, 192, 384, 768], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  init_values=[1, 1, 1, 1], heads_ranges=[3, 3, 3, 3], mlp_ratios=[3, 3, 3, 3], drop_path_rate=0.1, norm_layer=nn.LayerNorm, 
                  patch_norm=True, use_checkpoints=[False, False, False, False], chunkwise_recurrents=[True, True, False, False], projection=1024,
-                 layerscales=[False, False, False, False], layer_init_values=1e-6 ):
-        super().__init__()
-
-        self.num_classes = num_classes
+                 layerscales=[False, False, False, False], layer_init_values=1e-6,norm_eval = True,init_cfg=None,**kwargs  ):
+        super().__init__(init_cfg=init_cfg)
+        print("*"*50)
+        print(init_cfg)
         self.num_layers = len(depths)
         self.embed_dim = embed_dims[0]
         self.patch_norm = patch_norm
         self.num_features = embed_dims[-1]
         self.mlp_ratios = mlp_ratios
+        self.norm_eval = norm_eval
 
         # FIXME : numq = ？
         num_q = 50
@@ -1125,11 +1134,18 @@ class VisSegNet(nn.Module):
             #     )
             self.layers.append(layer)
             
-        self.proj = nn.Linear(self.num_features, projection)
-        self.norm = nn.BatchNorm2d(projection)
-        self.swish = MemoryEfficientSwish()
-        self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.head = nn.Linear(projection, num_classes) if num_classes > 0 else nn.Identity()
+        # self.proj = nn.Linear(self.num_features, projection)
+        # self.norm = nn.BatchNorm2d(projection)
+        # self.swish = MemoryEfficientSwish()
+        # self.avgpool = nn.AdaptiveAvgPool1d(1)
+        # self.head = nn.Linear(projection, num_classes) if num_classes > 0 else nn.Identity()
+        self.extra_norms = nn.ModuleList()
+        for i in range (4):
+            
+            self.extra_norms.append(nn.LayerNorm(embed_dims[i]))
+        # self.init_weights(pretrained=init_cfg["checkpoint"])
+        # For Seg : 
+        self.pretrained = init_cfg["checkpoint"]
 
         self.apply(self._init_weights)
 
@@ -1144,6 +1160,47 @@ class VisSegNet(nn.Module):
                 nn.init.constant_(m.weight, 1.0)
             except:
                 pass
+    #For Seg
+    def init_weights(self, pretrained=None):
+        """Initialize the weights in backbone.
+
+        Args:
+            pretrained (str, optional): Path to pre-trained weights.
+                Defaults to None.
+        """
+
+        
+        def _init_weights(m):
+            if isinstance(m, nn.Linear):
+                trunc_normal_(m.weight, std=.02)
+                if isinstance(m, nn.Linear) and m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+        print(pretrained)
+        if pretrained is None:
+            pretrained = self.pretrained
+
+        if isinstance(pretrained, str):
+            ckpt = torch.load(pretrained, map_location='cpu',weights_only=False)
+            if "model" in ckpt:
+                state_dict = ckpt["model"]
+            elif "state_dict" in ckpt:
+                state_dict = ckpt["state_dict"]
+            else:
+                # 直接是参数字典
+                state_dict = ckpt
+
+            self.apply(_init_weights)
+            # logger = get_root_logger()
+            msg = self.load_state_dict(state_dict, strict=False)
+            print(msg)
+        elif pretrained is None:
+            self.apply(_init_weights)
+        else:
+            raise TypeError('pretrained must be a str or None')
+        
 
     @torch.jit.ignore
     def no_weight_decay(self):
@@ -1157,7 +1214,7 @@ class VisSegNet(nn.Module):
         b , c , h , w = x.shape
         # queries = torch.randn(b,num_q , self.embed_dim)
         # queries = queries / queries.norm(dim=-1, keepdim=True)
-        
+        out = []
         #  输出 b c , h ,w
         x = self.patch_embed(x)
         #FIXME : N , C -> B , N , C
@@ -1166,32 +1223,45 @@ class VisSegNet(nn.Module):
         
         # 在这个layer内部，每个block都会做一次corss attention
 
-        for layer in self.layers:
-            x , queries = layer(x , queries , epoch)
-        
+        for index , layer in enumerate(self.layers):
+            x, x_ori , queries = layer(x , queries , epoch)
+            # 输入:bchw , norm : bhwc , 输出:bchw
+            x_ori = x_ori.permute(0,2,3,1)
+            x_ori = self.extra_norms[index](x_ori)
+            x_ori = x_ori.permute(0,3,1,2)
+            out.append(x_ori.contiguous())
+
         #x : b c h w
-        x = rearrange(x , "b c h w -> b h w c")
+        # x = rearrange(x , "b c h w -> b h w c")
 
-        x = self.proj(x) #(b h w c)
-        x = self.norm(x.permute(0, 3, 1, 2)).flatten(2, 3) #(b c h*w)
-        x = self.swish(x)
+        # x = self.proj(x) #(b h w c)
+        # x = self.norm(x.permute(0, 3, 1, 2)).flatten(2, 3) #(b c h*w)
+        # x = self.swish(x)
 
-        x = self.avgpool(x)  # B C 1
-        x = torch.flatten(x, 1)
+        # x = self.avgpool(x)  # B C 1
+        # x = torch.flatten(x, 1)
 
         # b h c
-        return x
+        return tuple(out)
 
     def forward(self, x ,epoch=200):
-        x = self.forward_features(x , epoch)
-        x = self.head(x)
-        return x
+        return  self.forward_features(x , epoch)
 
-
+    ##for Seg :在微调的时候使用预训练的bn，会好一点
+    def train(self, mode=True):
+        # print("__fuck__"*20)
+        """Convert the model into training mode while keep normalization layer
+        freezed."""
+        super().train(mode)
+        if mode and self.norm_eval:
+            for m in self.modules():
+                # trick: eval have effect on BatchNorm only
+                if isinstance(m, nn.BatchNorm2d) or isinstance(m,nn.SyncBatchNorm):
+                    m.eval()
 
 @register_model
 def tokenGalerkin_t(args):
-    model = VisSegNet(
+    model = ProbeNet(
         num_classes= args.nb_classes,
         embed_dims=[64, 128, 256, 512],
         depths=[2,2,8,2],

@@ -359,7 +359,7 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
@@ -500,7 +500,7 @@ def main(args):
                         'args': args,
                         'max_accuracy': max_accuracy,
                     }, checkpoint_path)
-            if epoch % 10 == 0:
+            if epoch % 30 == 0:
                 if args.model_ema:
                     utils.save_on_master({
                         'model': model_without_ddp.state_dict(),

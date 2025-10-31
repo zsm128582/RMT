@@ -9,8 +9,10 @@ from mmengine.logging import print_log
 from mmengine.runner import Runner
 
 from mmseg.registry import RUNNERS
+# do nothing ，只是为了让系统扫描到这个文件，然后registry上
 from BiUnet.BiUnet import  BiUnet
 from RMT import RMT
+from models.TokenGalerkinAttention.segmentBackbone import ProbeNet
 # import model
 
 def parse_args():
