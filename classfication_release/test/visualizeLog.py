@@ -41,7 +41,8 @@ def plot_metrics(log_files, metrics):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.show()
+    # plt.show()
+    plt.savefig("/home/zengshimao/code/RMT/classfication_release/work_dirs/fig.png")
 
 
 if __name__ == "__main__":

@@ -1,11 +1,12 @@
-from SegNet.segmentBackbone import VisSegNet_S
+# from SegNet.segmentBackbone import VisSegNet_S
 from SegNet_argmax.segmentBackbone import VisSegNet_argmax_S
-from SegNet_conv.segmentBackbone import VisSegNet_conv_T
+# from SegNet_conv.segmentBackbone import VisSegNet_conv_T
 from TokenGalerkinAttention.segmentBackbone import tokenGalerkin_t
 from conv_tokenGalerkin.segmentBackbone import convTokenGalerkin_t
-from RMT import RMT_T3
+from tokenGalerkin_fixCollapes.segmentBackbone import tokengalerkin_fixCollapse_t
+# from RMT import RMT_T3
 import torch
-import cv2
+# import cv2
 from PIL import Image
 from torchvision import datasets, transforms
 from torchvision.datasets.folder import ImageFolder, default_loader
@@ -14,8 +15,8 @@ from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 import argparse
 import matplotlib.pyplot as plt
 import numpy as np
-from pytorch_grad_cam import GradCAM
-from pytorch_grad_cam.utils.image import show_cam_on_image
+# from pytorch_grad_cam import GradCAM
+# from pytorch_grad_cam.utils.image import show_cam_on_image
 
 
 def build_transform(is_train, args):
@@ -328,18 +329,17 @@ def calRMTSimilarity(layer , block):
 
 def calQueriesSimilarity(layer , block):
     def calHook(module , input , output):
-        # print(input) # 输出为()
-        # print(module) # 输出正确
-        # print(output) # 存在输出
-        queries , _ , _ , _ = input  # ValueError: not enough values to unpack (expected 4, got 0)
+        queries , _ , _ , _,_,_ = input  # ValueError: not enough values to unpack (expected 4, got 0)
+        
         with torch.no_grad():
             token_embeddings = queries.squeeze(0) 
             norm_embeddings = F.normalize(token_embeddings, p=2, dim=1)
             similarity_matrix = torch.matmul(norm_embeddings, norm_embeddings.transpose(0, 1))
             print("--------input-----------")
+            print(queries.shape)
             print(f"layer :{layer} - block: {block}")
-            print(f"mean similarity:{similarity_matrix.mean()}")
-            print(similarity_matrix)
+            print(f"mean similarity: {similarity_matrix.mean() - 1/queries.shape[1]}")
+            # print(similarity_matrix)
         
 
     return calHook
@@ -348,13 +348,17 @@ import os
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
-    work_dir = "/home/zengshimao/code/RMT/classfication_release/work_dirs/RMT/rmt_t_subset100"
+    # work_dir = "/home/zengshimao/code/RMT/classfication_release/work_dirs/SegNet/argmax_s"
+    work_dir = "/home/zengshimao/code/RMT/classfication_release/work_dirs/tokengalerkin_fixCollapse_100q"
+
     resume = os.path.join(work_dir , "checkpoint.pth")
     
     checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
     args.nb_classes = 100
-    model = RMT_T3(args)
+    model = tokengalerkin_fixCollapse_t(args)
     depths=[2,2,8,2]
+    # model = VisSegNet_argmax_S(args)
+    # depths = [3, 4, 18, 4]
     # model = VisSegNet_argmax_S(args)
     # depths = [3, 4, 18, 4]
     loadres = model.load_state_dict(checkpoint['model'], strict=False)
@@ -378,13 +382,18 @@ if __name__ == '__main__':
         input_tensor = preprocess(img).unsqueeze(0)
         
         hooks = []
-        for layer_index in range(2,4):
+        for layer_index in range(0,4):
             for block_index in range(depths[layer_index]):
-                hooks.append( model.layers[layer_index].blocks[block_index].register_forward_hook(calRMTSimilarity(layer_index , block_index)))
+                hooks.append( model.layers[layer_index].blocks[block_index].register_forward_hook(calQueriesSimilarity(layer_index , block_index)))
 
 
         with torch.no_grad():
             res = model(input_tensor)
+            cls = torch.argmax(res,dim=1)
+            prob = F.softmax(res, dim=1)
+            confidence =prob.gather(1,cls.unsqueeze(1)).squeeze(1)
+            print(f"classfication res :{cls}")
+            print(f"confidence :{confidence}")
         for h in hooks:
             h.remove()
 

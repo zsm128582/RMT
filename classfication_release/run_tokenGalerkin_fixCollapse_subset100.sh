@@ -1,0 +1,1 @@
+torchrun --nproc_per_node=1  main.py --warmup-epochs 5 --model tokengalerkin_fixCollapse_t   --data-path /home/zengshimao/datasets/ImageNet1k --data-set IMNET_SUBSET --sub-classes 100 --num_workers 16  --batch-size 256  --drop-path 0.05  --epoch 200 --no-model-ema --dist-eval  --output_dir /home/zengshimao/code/RMT/classfication_release/work_dirs/tokengalerkin_fixCollapse_100q
