@@ -26,7 +26,7 @@ from samplers import RASampler
 import utils
 import os
 
-# from RMT import RMT_T3, RMT_S, RMT_M2, RMT_L6
+from RMT import RMT_T3, RMT_S, RMT_M2, RMT_L6
 # # from vsa import VSN
 # # from Restore import Restormer_default
 # # from Utentive import Utentive_default
@@ -47,7 +47,7 @@ from conv_tokenGalerkin.segmentBackbone import convTokenGalerkin_t
 from tokenGalerkin_fixCollapes.segmentBackbone import tokengalerkin_fixCollapse_t
 from tokenGalerkin_fixCollapes_v2.segmentBackbone import tokengalerkin_fixCollapse_t_v2
 archs = {
-            # 'RMT_T': RMT_T3,
+            'RMT_T': RMT_T3,
             # 'RMT_S': RMT_S,
             # 'RMT_B': RMT_M2,
             # 'RMT_L': RMT_L6,

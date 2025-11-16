@@ -1,0 +1,68 @@
+_base_ = [
+    "../BiUnet/engineVersion.py"
+]
+
+model = dict(
+    backbone=dict(
+        _delete_ = True,
+        chunkwise_recurrents=[
+            True,
+            True,
+            True,
+            False,
+        ],
+        depths=[
+            2,
+            2,
+            8,
+            2,
+        ],
+        drop_path_rate=0.15,
+        embed_dims=[
+            64,
+            128,
+            256,
+            512,
+        ],
+        heads_ranges=[
+            4,
+            4,
+            6,
+            6,
+        ],
+        init_cfg=dict(
+            checkpoint=
+            "/home/zengshimao/code/RMT/classfication_release/work_dirs/tokengalerkin_fixCollapse_t_v2/best.pth",
+            type='Pretrained'),
+        init_values=[
+            2,
+            2,
+            2,
+            2,
+        ],
+        layerscales=[
+            False,
+            False,
+            False,
+            False,
+        ],
+        mlp_ratios=[
+            3,
+            3,
+            3,
+            3,
+        ],
+        num_heads=[
+            4,
+            4,
+            8,
+            16,
+        ],
+        out_indices=(
+            0,
+            1,
+            2,
+            3,
+        ),
+        type='tokenNet'),
+)
