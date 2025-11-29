@@ -26,7 +26,7 @@ from samplers import RASampler
 import utils
 import os
 
-# from RMT import RMT_T3, RMT_S, RMT_M2, RMT_L6
+from RMT import RMT_T3, RMT_S, RMT_M2, RMT_L6
 # # from vsa import VSN
 # # from Restore import Restormer_default
 # # from Utentive import Utentive_default
@@ -44,8 +44,11 @@ from TokenAttention.segmentBackbone import tokenNet_t
 from TokenGalerkinAttention.segmentBackbone import tokenGalerkin_t
 from UNet.BiUnet import BiUnet_t
 from conv_tokenGalerkin.segmentBackbone import convTokenGalerkin_t
+from tokenGalerkin_fixCollapes.segmentBackbone import tokengalerkin_fixCollapse_t
+from tokenGalerkin_fixCollapes_v2.segmentBackbone import tokengalerkin_fixCollapse_t_v2
+from tokenGalerkin_v2_noToken.segmentBackbone import image_galerkin
 archs = {
-            # 'RMT_T': RMT_T3,
+            'RMT_T': RMT_T3,
             # 'RMT_S': RMT_S,
             # 'RMT_B': RMT_M2,
             # 'RMT_L': RMT_L6,
@@ -62,7 +65,10 @@ archs = {
             'tokenNet_t':tokenNet_t,
             'tokenGalerkin_t' : tokenGalerkin_t,
             "BiUnet_t":BiUnet_t,
-            "convTokenGalerkin_t":convTokenGalerkin_t
+            "convTokenGalerkin_t":convTokenGalerkin_t,
+            "tokengalerkin_fixCollapse_t":tokengalerkin_fixCollapse_t,
+            "tokengalerkin_fixCollapse_t_v2":tokengalerkin_fixCollapse_t_v2,
+            'image_galerkin':image_galerkin
             # 'Restormer' : Restormer_default,
             # 'Utentive' : Utentive_default,
             # 'Half' : HalfRestomer_defalt
@@ -359,7 +365,7 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
@@ -500,7 +506,7 @@ def main(args):
                         'args': args,
                         'max_accuracy': max_accuracy,
                     }, checkpoint_path)
-            if epoch % 10 == 0:
+            if epoch % 30 == 0:
                 if args.model_ema:
                     utils.save_on_master({
                         'model': model_without_ddp.state_dict(),

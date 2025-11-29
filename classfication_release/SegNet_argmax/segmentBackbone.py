@@ -108,7 +108,7 @@ class MaskAttention(nn.Module):
         x: (b, n+h*w , c)
         '''
         #FIXME:
-        bsz, seq_len , _ = x.size()
+        bsz, seq_len , c = x.size()
         queriesNum = 8
         # 
         q = self.q_proj(x)

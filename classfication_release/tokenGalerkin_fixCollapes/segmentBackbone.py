@@ -48,7 +48,46 @@ class MLP(nn.Module):
         if self.sigmoid_output:
             x = F.sigmoid(x)
         return x
+    
+class SwiftFormerLocalRepresentation(nn.Module):
+    """
+    Local Representation module for SwiftFormer that is implemented by 3*3 depth-wise and point-wise convolutions.
+    Input: tensor in shape [B, C, H, W]
+    Output: tensor in shape [B, C, H, W]
+    """
 
+    def __init__(self, dim, kernel_size=3, drop_path=0., use_layer_scale=True):
+        super().__init__()
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=kernel_size // 2, groups=dim)
+        self.norm = nn.BatchNorm2d(dim)
+        self.pwconv1 = nn.Conv2d(dim, dim, kernel_size=1)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Conv2d(dim, dim, kernel_size=1)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. \
+            else nn.Identity()
+        self.use_layer_scale = use_layer_scale
+        if use_layer_scale:
+            self.layer_scale = nn.Parameter(torch.ones(dim).unsqueeze(-1).unsqueeze(-1), requires_grad=True)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Conv2d):
+            trunc_normal_(m.weight, std=.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        input = x
+        x = self.dwconv(x)
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.pwconv2(x)
+        if self.use_layer_scale:
+            x = input + self.drop_path(self.layer_scale * x)
+        else:
+            x = input + self.drop_path(x)
+        return x
 
 class TwoWayAttentionBlock(nn.Module):
     def __init__(
@@ -74,8 +113,11 @@ class TwoWayAttentionBlock(nn.Module):
           skip_first_layer_pe (bool): skip the PE on the first layer
         """
         super().__init__()
+
+        self.local_representation = SwiftFormerLocalRepresentation(dim = embedding_dim ,kernel_size=3 , drop_path=0.0 , use_layer_scale=True )
+
         # 原文中，这里要对qkv的c做压缩，做完attention后再复原回来。。但我感觉这样损失信息太多了，暂时不采用
-        self.self_attn = nn.MultiheadAttention(embedding_dim, num_heads,batch_first=True)
+        # self.self_attn = nn.MultiheadAttention(embedding_dim, num_heads,batch_first=True)
         self.norm1 = nn.LayerNorm(embedding_dim)
 
         self.cross_attn_token_to_image = nn.MultiheadAttention(embedding_dim, num_heads,batch_first=True)
@@ -92,31 +134,34 @@ class TwoWayAttentionBlock(nn.Module):
 
         self.skip_first_layer_pe = skip_first_layer_pe
 
+
+
     def forward(
-        self, queries: torch.Tensor, keys: torch.Tensor, query_pe: torch.Tensor, key_pe: torch.Tensor
+        self, queries: torch.Tensor, keys: torch.Tensor, query_pe: torch.Tensor, key_pe: torch.Tensor , h , w
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Self attention block
-        if self.skip_first_layer_pe:
-            """"
-                    self,
-        query: Tensor,
-        key: Tensor,
-        value: Tensor,
-        key_padding_mask: Optional[Tensor] = None,
-        need_weights: bool = True,
-        attn_mask: Optional[Tensor] = None,
-        average_attn_weights: bool = True,
-        is_causal: bool = False,
-            """
-            queries = self.self_attn(query=queries, key=queries, value=queries,need_weights=False)[0]
-        else:
-            q = queries + query_pe
-            attn_out = self.self_attn(query=q, key=q, value=queries,need_weights=False)[0]
-            queries = queries + attn_out
+        # if self.skip_first_layer_pe:
+        #     """"
+        #             self,
+        # query: Tensor,
+        # key: Tensor,
+        # value: Tensor,
+        # key_padding_mask: Optional[Tensor] = None,
+        # need_weights: bool = True,
+        # attn_mask: Optional[Tensor] = None,
+        # average_attn_weights: bool = True,
+        # is_causal: bool = False,
+        #     """
+        #     queries = self.self_attn(query=queries, key=queries, value=queries,need_weights=False)[0]
+        # else:
+        #     q = queries + query_pe
+        #     attn_out = self.self_attn(query=q, key=q, value=queries,need_weights=False)[0]
+        #     queries = queries + attn_out
 
-        
+        # 使用 after norm 的方式。这里能不能改得现代一点呢？ 
+        keys = self.local_representation(rearrange(keys , "b ( h w ) c -> b c h w" , h = h))
+        keys = rearrange(keys , "b c h w -> b (h w ) c")
+
         queries = self.norm1(queries)
-
         # Cross attention block, tokens attending to image embedding
         q = queries + query_pe
         k = keys + key_pe
@@ -131,20 +176,56 @@ class TwoWayAttentionBlock(nn.Module):
 
         #
         # Cross attention block, image embedding attending to tokens
+        # 这里似乎没有必要加位置编码，也许也是有用的，因为位置编码不仅是空间上的位置编码，对于维度上也有变化
         q = queries + query_pe
         # k = keys + key_pe # 图像
         attn_out = self.cross_attn_image_to_token(x = keys , token = q)
-
-
-
-
         keys = keys + attn_out
         keys = self.norm4(keys)
 
         return queries, keys
+class ConvEncoder(nn.Module):
+    """
+    Implementation of ConvEncoder with 3*3 and 1*1 convolutions.
+    Input: tensor with shape [B, C, H, W]
+    Output: tensor with shape [B, C, H, W]
+    """
+
+    def __init__(self, dim, hidden_dim=64, kernel_size=3, drop_path=0., use_layer_scale=True):
+        super().__init__()
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=kernel_size // 2, groups=dim)
+        self.norm = nn.BatchNorm2d(dim)
+        self.pwconv1 = nn.Conv2d(dim, hidden_dim, kernel_size=1)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Conv2d(hidden_dim, dim, kernel_size=1)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. \
+            else nn.Identity()
+        self.use_layer_scale = use_layer_scale
+        if use_layer_scale:
+            self.layer_scale = nn.Parameter(torch.ones(dim).unsqueeze(-1).unsqueeze(-1), requires_grad=True)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Conv2d):
+            trunc_normal_(m.weight, std=.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        input = x
+        x = self.dwconv(x)
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.pwconv2(x)
+        if self.use_layer_scale:
+            x = input + self.drop_path(self.layer_scale * x)
+        else:
+            x = input + self.drop_path(x)
+        return x
 
 class TokenAttentionLayer(nn.Module):
-    def __init__(self, embed_dim, out_dim, depth, num_heads,
+    def __init__(self, embed_dim, out_dim, depth, num_heads, num_q,
                  ffn_dim=96., drop_path=0., norm_layer=nn.LayerNorm, 
                  downsample: PatchMerging=None, 
                  layerscale=False, layer_init_values=1e-5):
@@ -155,32 +236,31 @@ class TokenAttentionLayer(nn.Module):
         self.image_pe = PositionEmbeddingSine(self.embed_dim)
         # 定义一个包含多个卷积块的序列
         layers = []
-        
-        # 第一层的输入通道是 in_channels (即d)
-        current_in_channels = embed_dim
-        
-        for i in range(2):
-            # 卷积层：核大小3x3，padding=1 保持 h 和 w 不变
-            conv = nn.Conv2d(
-                in_channels=current_in_channels,
-                out_channels=embed_dim, # 可以让所有卷积层的输出通道保持一致
-                kernel_size=3,
-                padding=1,
-                bias=False # 通常在 BatchNorm 之后设置 bias=False
-            )
-            layers.append(conv)
+        self.num_q = num_q
+        self.q_pos = nn.Parameter(torch.randn(1,self.num_q ,self.embed_dim ))
+        # for i in range(2):
+        #     # 卷积层：核大小3x3，padding=1 保持 h 和 w 不变
+        #     conv = nn.Conv2d(
+        #         in_channels=current_in_channels,
+        #         out_channels=embed_dim, # 可以让所有卷积层的输出通道保持一致
+        #         kernel_size=3,
+        #         padding=1,
+        #         bias=False # 通常在 BatchNorm 之后设置 bias=False
+        #     )
+        #     layers.append(conv)
             
-            # 插入归一化层 (BatchNorm2d)
-            layers.append(nn.BatchNorm2d(embed_dim))
+        #     # 插入归一化层 (BatchNorm2d)
+        #     layers.append(nn.BatchNorm2d(embed_dim))
             
-            # 插入激活函数 (ReLU 是一个常用且效果良好的选择)
-            layers.append(nn.ReLU(inplace=True))
+        #     # 插入激活函数 (ReLU 是一个常用且效果良好的选择)
+        #     layers.append(nn.ReLU(inplace=True))
             
-            # 更新下一层的输入通道数
-            current_in_channels = embed_dim
+        #     # 更新下一层的输入通道数
+        #     current_in_channels = embed_dim
         
-        # 使用 nn.Sequential 将所有层包装起来
-        self.conv_layers = nn.Sequential(*layers)
+        # # 使用 nn.Sequential 将所有层包装起来
+        # self.conv_layers = nn.Sequential(*layers)
+        self.conv_layers = ConvEncoder(embed_dim , ffn_dim , kernel_size=3)
 
 
         # build blocks
@@ -206,7 +286,7 @@ class TokenAttentionLayer(nn.Module):
         # b c h w 
         
         image_pos = self.image_pe(x)
-        # 这个卷积层需要每次做attention前都做一下？
+
         x = self.conv_layers(x)
         x = rearrange(x , 'b d h w->b (h w) d')
         image_pos = rearrange(image_pos , 'b c h w -> b  (h w) c')
@@ -215,7 +295,7 @@ class TokenAttentionLayer(nn.Module):
 
 
         for index , blk in enumerate(self.blocks):
-            queries , keys = blk(queries , keys ,  queries_embedding , image_pos)
+            queries , keys = blk(queries  , keys,  self.q_pos ,  image_pos , h , w )
         
         queries = queries + queries_embedding
         x = keys + x
@@ -1041,14 +1121,14 @@ class ConvLayer(nn.Module):
             self.downsample = None
             self.queriesLinear = None
     
-    def forward(self,  x , queries,epoch = None):
+    def forward(self,  x , queries):
         b, c  , h , w = x.size()
         b,n,d = queries.size()
         
         for blk in self.blocks:
             x , queries= blk(x , queries)
         
-        # x = x.permute(0,2,3,1)   
+        x = x.permute(0,2,3,1)   
         
         if self.downsample is not None:
             x = self.downsample(x)
@@ -1074,8 +1154,10 @@ class VisSegNet(nn.Module):
         self.mlp_ratios = mlp_ratios
 
         # FIXME : numq = ？
-        num_q = 50
-        self.q = nn.Parameter(torch.randn(1, num_q, self.embed_dim) * 0.02)
+        self.num_q = 100
+        # self.q = nn.Parameter(torch.randn(1, num_q, self.embed_dim) * 0.02)
+        # 删除了 0.02 ，期望不坍缩
+        self.q = nn.Parameter(torch.randn(1, self.num_q, self.embed_dim))
 
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(in_chans=in_chans, embed_dim=embed_dims[0],
@@ -1087,23 +1169,11 @@ class VisSegNet(nn.Module):
         # build layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
-            if i_layer == 0:
-                layer = ConvLayer(embed_dim= embed_dims[i_layer],
-                                  out_dim=embed_dims[i_layer+1],
-                                  depth=depths[i_layer],
-                                  kernel_size = 17,
-                                  ls_init_value = None,
-                                  res_scale = True,
-                                  num_heads=num_heads[i_layer],
-                                  mlp_ratio=mlp_ratios[i_layer],
-                                  dpr=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
-                                  downsample=PatchMerging,
-                                  )
-            else:
-                layer = TokenAttentionLayer(embed_dim=embed_dims[i_layer],
+            layer = TokenAttentionLayer(embed_dim=embed_dims[i_layer],
                                         out_dim=embed_dims[i_layer+1] if (i_layer < self.num_layers - 1) else None,
                                         depth=depths[i_layer],
                                         num_heads=num_heads[i_layer],
+                                        num_q= self.num_q,
                                         ffn_dim=int(mlp_ratios[i_layer]*embed_dims[i_layer]),
                                         drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                         norm_layer=norm_layer,
@@ -1111,32 +1181,6 @@ class VisSegNet(nn.Module):
                                         layerscale=layerscales[i_layer],
                                         layer_init_values=layer_init_values
                                         )
-            # if i_layer == 0:  
-            #     #好大的核
-            #     layer = ConvLayer(embed_dim= embed_dims[i_layer],
-            #                       out_dim=embed_dims[i_layer+1],
-            #                       depth=depths[i_layer],
-            #                       kernel_size = 17,
-            #                       ls_init_value = None,
-            #                       res_scale = True,
-            #                       num_heads=num_heads[i_layer],
-            #                       mlp_ratio=mlp_ratios[i_layer],
-            #                       dpr=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
-            #                       downsample=PatchMerging,
-            #                       )
-            # else:
-            #     layer = SegLayer(
-            #         embed_dim=embed_dims[i_layer],
-            #         out_dim=embed_dims[i_layer+1] if (i_layer < self.num_layers - 1) else None,
-            #         depth=depths[i_layer],
-            #         num_heads=num_heads[i_layer],
-            #         ffn_dim=int(mlp_ratios[i_layer]*embed_dims[i_layer]),
-            #         drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
-            #         norm_layer=norm_layer,
-            #         downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
-            #         layerscale=layerscales[i_layer],
-            #         layer_init_values=layer_init_values
-            #     )
             self.layers.append(layer)
             
         self.proj = nn.Linear(self.num_features, projection)
@@ -1203,8 +1247,8 @@ class VisSegNet(nn.Module):
 
 
 
-
-def convTokenGalerkin_t(args):
+@register_model
+def tokengalerkin_fixCollapse_t(args):
     model = VisSegNet(
         num_classes= args.nb_classes,
         embed_dims=[64, 128, 256, 512],

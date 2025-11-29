@@ -32,7 +32,7 @@ model = dict(
         ],
         init_cfg=dict(
             checkpoint=
-            '/home/zengshimao/code/RMT/classfication_release/work_dirs/RMT/rmt_t_subset100/best.pth',
+            "/home/zengshimao/code/RMT/classfication_release/work_dirs/tokengalerkin_fixCollapse_t_v2/best.pth",
             type='Pretrained'),
         init_values=[
             2,
@@ -64,5 +64,5 @@ model = dict(
             2,
             3,
         ),
-        type='RMT'),
+        type='tokenNet'),
 )

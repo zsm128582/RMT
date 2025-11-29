@@ -12,3 +12,4 @@ save
 *.pth
 model_best.pth.tar
 *.npy
+.venv

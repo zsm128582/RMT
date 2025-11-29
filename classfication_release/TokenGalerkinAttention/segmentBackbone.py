@@ -95,7 +95,6 @@ class TwoWayAttentionBlock(nn.Module):
     def forward(
         self, queries: torch.Tensor, keys: torch.Tensor, query_pe: torch.Tensor, key_pe: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Self attention block
         if self.skip_first_layer_pe:
             """"
                     self,
@@ -215,7 +214,7 @@ class TokenAttentionLayer(nn.Module):
 
 
         for index , blk in enumerate(self.blocks):
-            queries , keys = blk(queries = queries , keys = keys , query_pe = queries_embedding , key_pe = image_pos)
+            queries , keys = blk(queries  , keys,  queries_embedding ,  image_pos)
         
         queries = queries + queries_embedding
         x = keys + x
