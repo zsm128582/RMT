@@ -1,0 +1,1 @@
+torchrun --nproc_per_node=1  main.py --warmup-epochs 5 --model tokengalerkin_sam2   --data-path /root/datasets/Imagenet1k --data-set IMNET_SUBSET --sub-classes 100 --num_workers 8  --batch-size 256  --drop-path 0.05  --epoch 200 --no-model-ema --dist-eval  --output_dir /root/code/RMT/classfication_release/work_dirs/TokenNet/tokenSam2
