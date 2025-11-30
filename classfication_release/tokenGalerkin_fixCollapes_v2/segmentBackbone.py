@@ -1146,7 +1146,7 @@ class VisSegNet(nn.Module):
                  embed_dims=[96, 192, 384, 768], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  init_values=[1, 1, 1, 1], heads_ranges=[3, 3, 3, 3], mlp_ratios=[3, 3, 3, 3], drop_path_rate=0.1, norm_layer=nn.LayerNorm, 
                  patch_norm=True, use_checkpoints=[False, False, False, False], chunkwise_recurrents=[True, True, False, False], projection=1024,
-                 layerscales=[False, False, False, False], layer_init_values=1e-6 ):
+                 layerscales=[False, False, False, False], layer_init_values=1e-6,num_q = 50 ):
         super().__init__()
 
         self.num_classes = num_classes
@@ -1156,8 +1156,7 @@ class VisSegNet(nn.Module):
         self.num_features = embed_dims[-1]
         self.mlp_ratios = mlp_ratios
 
-        # FIXME : numq = ？
-        self.num_q = 50
+        self.num_q = num_q
         # self.q = nn.Parameter(torch.randn(1, num_q, self.embed_dim) * 0.02)
         # 删除了 0.02 ，期望不坍缩
         self.q = nn.Parameter(torch.randn(1, self.num_q, self.embed_dim))
@@ -1248,6 +1247,7 @@ class VisSegNet(nn.Module):
         x = self.head(x)
         return x
 
+# v2 : 指的是给galerkin 添加了softmax。 对图像做mlp
 
 
 @register_model
@@ -1263,6 +1263,43 @@ def tokengalerkin_fixCollapse_t_v2(args):
         drop_path_rate=0.1,
         chunkwise_recurrents=[True, True, True, False],
         layerscales=[False, False, False, False]
+    )
+    model.default_cfg = _cfg()
+    return model
+
+
+@register_model
+def tokengalerkin_fixCollapse_s_v2(args):
+    model = VisSegNet(
+        num_classes= args.nb_classes,
+        embed_dims=[64, 128, 256, 512],
+        depths=[3,4,12,4],
+        num_heads=[4, 4, 8, 16],
+        init_values=[2, 2, 2, 2],
+        heads_ranges=[4, 4, 6, 6],
+        mlp_ratios=[4, 4, 3, 3],
+        drop_path_rate=0.1,
+        chunkwise_recurrents=[True, True, True, False],
+        layerscales=[False, False, False, False]
+    )
+    model.default_cfg = _cfg()
+    return model
+
+
+@register_model
+def tokengalerkin_fixCollapse_t_v2_30q(args):
+    model = VisSegNet(
+        num_classes= args.nb_classes,
+        embed_dims=[64, 128, 256, 512],
+        depths=[2,2,8,2],
+        num_heads=[4, 4, 8, 16],
+        init_values=[2, 2, 2, 2],
+        heads_ranges=[4, 4, 6, 6],
+        mlp_ratios=[3, 3, 3, 3],
+        drop_path_rate=0.1,
+        chunkwise_recurrents=[True, True, True, False],
+        layerscales=[False, False, False, False],
+        num_q = 30
     )
     model.default_cfg = _cfg()
     return model
