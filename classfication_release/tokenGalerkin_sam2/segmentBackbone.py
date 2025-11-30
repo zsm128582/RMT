@@ -128,9 +128,9 @@ class TwoWayAttentionBlock(nn.Module):
         )
         self.norm3 = nn.LayerNorm(embedding_dim)
 
-        # self.norm4 = nn.LayerNorm(embedding_dim)
+        self.norm4 = nn.LayerNorm(embedding_dim)
         # self.cross_attn_image_to_token = nn.MultiheadAttention(embedding_dim, num_heads,batch_first=True)
-        self.cross_attn_image_to_token = simple_attn(embedding_dim , num_heads)
+        self.cross_attn_image_to_token = nn.MultiheadAttention(embedding_dim , num_heads , batch_first=True)
 
         self.skip_first_layer_pe = skip_first_layer_pe
 
@@ -139,37 +139,15 @@ class TwoWayAttentionBlock(nn.Module):
     def forward(
         self, queries: torch.Tensor, keys: torch.Tensor, query_pe: torch.Tensor, key_pe: torch.Tensor , h , w
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # if self.skip_first_layer_pe:
-        #     """"
-        #             self,
-        # query: Tensor,
-        # key: Tensor,
-        # value: Tensor,
-        # key_padding_mask: Optional[Tensor] = None,
-        # need_weights: bool = True,
-        # attn_mask: Optional[Tensor] = None,
-        # average_attn_weights: bool = True,
-        # is_causal: bool = False,
-        #     """
-        #     queries = self.self_attn(query=queries, key=queries, value=queries,need_weights=False)[0]
-        # else:
-        #     q = queries + query_pe
-        #     attn_out = self.self_attn(query=q, key=q, value=queries,need_weights=False)[0]
-        #     queries = queries + attn_out
-
         # 使用 after norm 的方式。这里能不能改得现代一点呢？ 
 
-
+        # 1. 先补充局部的信息
         keys = self.local_representation(rearrange(keys , "b ( h w ) c -> b c h w" , h = h))
         keys = rearrange(keys , "b c h w -> b (h w ) c")
 
-
-
-        # queries = self.norm1(queries)
-        # Cross attention block, tokens attending to image embedding
-        q = queries + query_pe
-        k = keys + key_pe
-        attn_out , attn_weight = self.cross_attn_token_to_image(query= self.norm1(q), key=self.norm2(k), value=keys,need_weights=True)
+        q = self.norm1(queries + query_pe)
+        k = self.norm2(keys  + key_pe)
+        attn_out = self.cross_attn_token_to_image(query= q , key=k , value=k, need_weights=False)[0]
 
         queries = queries + attn_out
 
@@ -178,16 +156,16 @@ class TwoWayAttentionBlock(nn.Module):
         # queries = queries + mlp_out
         # queries = self.norm3(queries)
 
-        q = queries + query_pe
-        # k = keys + key_pe # 图像
-        attn_out = self.cross_attn_image_to_token(x = keys , token = q)
+        
+        q = self.norm3(queries + query_pe)
+        attn_out = self.cross_attn_image_to_token(query = k , key = q , value = q  , need_weights = False)[0]
         keys = keys + attn_out
 
-        keys =  keys + self.mlp(self.norm3(keys))
+        keys =  keys + self.mlp(self.norm4(keys))
 
         
 
-        return queries, keys,attn_weight
+        return queries, keys
 class ConvEncoder(nn.Module):
     """
     Implementation of ConvEncoder with 3*3 and 1*1 convolutions.
@@ -276,7 +254,7 @@ class TokenAttentionLayer(nn.Module):
 
 
         for index , blk in enumerate(self.blocks):
-            queries , keys  , _  = blk(queries  , keys,  self.q_pos ,  image_pos , h , w )
+            queries , keys   = blk(queries  , keys,  self.q_pos ,  image_pos , h , w )
         
         queries = queries + queries_embedding
         x = keys + x
@@ -362,7 +340,7 @@ class VisSegNet(nn.Module):
                  embed_dims=[96, 192, 384, 768], depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  init_values=[1, 1, 1, 1], heads_ranges=[3, 3, 3, 3], mlp_ratios=[3, 3, 3, 3], drop_path_rate=0.1, norm_layer=nn.LayerNorm, 
                  patch_norm=True, use_checkpoints=[False, False, False, False], chunkwise_recurrents=[True, True, False, False], projection=1024,
-                 layerscales=[False, False, False, False], layer_init_values=1e-6,num_q = 50 ):
+                 layerscales=[False, False, False, False], layer_init_values=1e-6 ):
         super().__init__()
 
         self.num_classes = num_classes
@@ -372,9 +350,7 @@ class VisSegNet(nn.Module):
         self.num_features = embed_dims[-1]
         self.mlp_ratios = mlp_ratios
 
-        self.num_q = num_q
-        # self.q = nn.Parameter(torch.randn(1, num_q, self.embed_dim) * 0.02)
-        # 删除了 0.02 ，期望不坍缩
+        self.num_q = 50
         self.q = nn.Parameter(torch.randn(1, self.num_q, self.embed_dim))
 
         # split image into non-overlapping patches
@@ -463,11 +439,10 @@ class VisSegNet(nn.Module):
         x = self.head(x)
         return x
 
-# v2 : 指的是给galerkin 添加了softmax。 对图像做mlp
 
 
 @register_model
-def tokengalerkin_fixCollapse_t_v2(args):
+def tokengalerkin_sam2(args):
     model = VisSegNet(
         num_classes= args.nb_classes,
         embed_dims=[64, 128, 256, 512],
@@ -479,43 +454,6 @@ def tokengalerkin_fixCollapse_t_v2(args):
         drop_path_rate=0.1,
         chunkwise_recurrents=[True, True, True, False],
         layerscales=[False, False, False, False]
-    )
-    model.default_cfg = _cfg()
-    return model
-
-
-@register_model
-def tokengalerkin_fixCollapse_s_v2(args):
-    model = VisSegNet(
-        num_classes= args.nb_classes,
-        embed_dims=[64, 128, 256, 512],
-        depths=[3,4,12,4],
-        num_heads=[4, 4, 8, 16],
-        init_values=[2, 2, 2, 2],
-        heads_ranges=[4, 4, 6, 6],
-        mlp_ratios=[4, 4, 3, 3],
-        drop_path_rate=0.1,
-        chunkwise_recurrents=[True, True, True, False],
-        layerscales=[False, False, False, False]
-    )
-    model.default_cfg = _cfg()
-    return model
-
-
-@register_model
-def tokengalerkin_fixCollapse_t_v2_30q(args):
-    model = VisSegNet(
-        num_classes= args.nb_classes,
-        embed_dims=[64, 128, 256, 512],
-        depths=[2,2,8,2],
-        num_heads=[4, 4, 8, 16],
-        init_values=[2, 2, 2, 2],
-        heads_ranges=[4, 4, 6, 6],
-        mlp_ratios=[3, 3, 3, 3],
-        drop_path_rate=0.1,
-        chunkwise_recurrents=[True, True, True, False],
-        layerscales=[False, False, False, False],
-        num_q = 30
     )
     model.default_cfg = _cfg()
     return model

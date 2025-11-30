@@ -488,7 +488,7 @@ class BiUnet(nn.Module):
         
         tokens_result = []
 
-        
+        # 取最后一层attention map可能太简略
         x , clstokens , attentionMap , clstokens_ori = self.layers[0](x , clstokens)
         tokens_result.append(torch.mean(clstokens_ori , dim = 1))
         #处理一下attentionmap
@@ -510,8 +510,10 @@ class BiUnet(nn.Module):
         attentionMap = attentionMap[:,self.num_q: , self.num_q:]
 
         for i in range(1,4):
+            # 融合太粗糙
             x = x + features[i]
             x , clstokens , clstokens_ori = self.layers[i](x , clstokens , attentionMap , mask_h , mask_w)
+            # 最终的分类结果还得好好看看
             tokens_result.append(torch.mean(clstokens_ori , dim=1))
 
         clstokens = torch.cat(tokens_result , dim=1)

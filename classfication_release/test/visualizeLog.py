@@ -10,7 +10,7 @@ def load_log(file_path):
             try:
                 data.append(json.loads(line))
             except json.JSONDecodeError:
-                print(f"⚠️ 跳过无法解析的行: {line.strip()}")
+                print(f"⚠️ skip line  {line.strip()}")
     return data
 
 
@@ -30,7 +30,7 @@ def plot_metrics(log_files, metrics):
 
         for metric in metrics:
             if metric not in data[0]:
-                print(f"⚠️ 文件 {name} 中不存在指标 {metric}")
+                print(f"⚠️ file {name} does not contain {metric}")
                 continue
             values = [d[metric] for d in data]
             plt.plot(epochs, values, label=f"{name} - {metric}")
@@ -41,15 +41,12 @@ def plot_metrics(log_files, metrics):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    # plt.show()
-    plt.savefig("/home/zengshimao/code/RMT/classfication_release/work_dirs/fig.png")
+    plt.show()
 
 
 if __name__ == "__main__":
     print("请输入日志文件路径（可输入多个，用空格分隔）：")
     log_files = input().strip().split()
-
     print("可选指标示例：train_loss, test_loss, test_acc1, test_acc5, train_lr")
     metrics = input("请输入要可视化的指标（可输入多个，用空格分隔）：").strip().split()
-
     plot_metrics(log_files, metrics)

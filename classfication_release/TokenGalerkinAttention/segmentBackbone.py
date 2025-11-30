@@ -1073,7 +1073,7 @@ class VisSegNet(nn.Module):
         self.mlp_ratios = mlp_ratios
 
         # FIXME : numq = ？
-        num_q = 50
+        num_q = 100
         self.q = nn.Parameter(torch.randn(1, num_q, self.embed_dim) * 0.02)
 
         # split image into non-overlapping patches
