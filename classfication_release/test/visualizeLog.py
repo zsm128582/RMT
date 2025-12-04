@@ -42,7 +42,8 @@ def plot_metrics(log_files, metrics):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.show()
+    # plt.show()
+    plt.savefig("/home/u2023110769/code/RMT/classfication_release/work_dirs/agentSwinTransformer_t/result.png")
 
 
 if __name__ == "__main__":
