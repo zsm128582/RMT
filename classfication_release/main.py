@@ -49,8 +49,10 @@ from tokenGalerkin_fixCollapes_v2.segmentBackbone import tokengalerkin_fixCollap
 from tokenGalerkin_v2_noToken.segmentBackbone import image_galerkin
 from tokenGalerkin_sam2.segmentBackbone import tokengalerkin_sam2
 from tokenScrewAll.segmentBackbone import tokenScrewAll
-from tokenGalerkin_sam2_dwShortCut.segmentBackbone import tokengalerkin_sam2_dwSC
 from agentAttention.agent_swin import agentSwinTransformer_t
+from tokenGalerkin_v2_channelConcat.segmentBackbone import tokengalerkin_channelConcat_t_v2
+from tokenGalerkin_v3_lessWeight.segmentBackbone import tokengalerkin_v3_lessweight_t
+from tokenGalerkin_hybrid_v2.segmentBackbone import tokengalerkin_v2_hybrid
 archs = {
             'RMT_T': RMT_T3,
             # 'RMT_S': RMT_S,
@@ -75,8 +77,10 @@ archs = {
             'image_galerkin':image_galerkin,
             "tokengalerkin_sam2":tokengalerkin_sam2,
             "tokenScrewAll":tokenScrewAll,
-            "tokengalerkin_sam2_dwSC":tokengalerkin_sam2_dwSC,
-            "agentSwinTransformer_t":agentSwinTransformer_t
+            "agentSwinTransformer_t":agentSwinTransformer_t,
+            'tokengalerkin_channelConcat_t_v2':tokengalerkin_channelConcat_t_v2,
+            'tokengalerkin_v3_lessweight_t':tokengalerkin_v3_lessweight_t,
+            'tokengalerkin_v2_hybrid':tokengalerkin_v2_hybrid
             # 'Restormer' : Restormer_default,
             # 'Utentive' : Utentive_default,
             # 'Half' : HalfRestomer_defalt
