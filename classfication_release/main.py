@@ -53,6 +53,7 @@ from agentAttention.agent_swin import agentSwinTransformer_t
 from tokenGalerkin_v2_channelConcat.segmentBackbone import tokengalerkin_channelConcat_t_v2
 from tokenGalerkin_v3_lessWeight.segmentBackbone import tokengalerkin_v3_lessweight_t
 from tokenGalerkin_hybrid_v2.segmentBackbone import tokengalerkin_v2_hybrid
+from tokenGalerkin_v2_fixResidual.segmentBackbone import tokengalerkin_v2_fixResidual
 archs = {
             'RMT_T': RMT_T3,
             # 'RMT_S': RMT_S,
@@ -80,7 +81,8 @@ archs = {
             "agentSwinTransformer_t":agentSwinTransformer_t,
             'tokengalerkin_channelConcat_t_v2':tokengalerkin_channelConcat_t_v2,
             'tokengalerkin_v3_lessweight_t':tokengalerkin_v3_lessweight_t,
-            'tokengalerkin_v2_hybrid':tokengalerkin_v2_hybrid
+            'tokengalerkin_v2_hybrid':tokengalerkin_v2_hybrid,
+            'tokengalerkin_v2_fixResidual':tokengalerkin_v2_fixResidual
             # 'Restormer' : Restormer_default,
             # 'Utentive' : Utentive_default,
             # 'Half' : HalfRestomer_defalt
@@ -292,7 +294,6 @@ def main(args):
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
     
-    torch.backends.cudnn.benchmark = True
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
         batch_size=args.batch_size,
@@ -377,7 +378,7 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
@@ -474,7 +475,7 @@ def main(args):
         test_stats = evaluate(data_loader_val, model, device , epochAsArgs=giveEpochAsArgs , epoch = args.resume_epoch)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         if model_ema is not None:
-            test_stats_ema = evaluate(data_loader_val, model, device , epochAsArgs=giveEpochAsArgs , epoch = args.resume_epoch)
+            test_stats_ema = evaluate(data_loader_val, model_ema.ema, device , epochAsArgs=giveEpochAsArgs , epoch = args.resume_epoch)
             print(f"Accuracy of the network_ema on the {len(dataset_val)} test images: {test_stats_ema['acc1']:.1f}%")
         return
 

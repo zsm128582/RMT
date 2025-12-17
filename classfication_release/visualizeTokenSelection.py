@@ -2,7 +2,7 @@
 # from SegNet_conv.segmentBackbone import VisSegNet_conv_T
 # from Qnet.segmentBackbone import Qnet_T
 import torch
-import cv2
+# import cv2
 from PIL import Image
 from torchvision import datasets, transforms
 from torchvision.datasets.folder import ImageFolder, default_loader
@@ -255,6 +255,114 @@ def backward_hook(module, grad_input, grad_output):
         grad_x = grad_output
     gradients = grad_x
 import torch.nn.functional as F
+
+
+def visualize_attention_heatmap(
+    attn_weights: torch.Tensor,
+    original_image: torch.Tensor,
+    h_feat: int,
+    w_feat: int,
+    alpha: float = 0.5,
+    colormap: str = 'jet',
+    save_path = None
+):
+    """
+    可视化 Cross Attention 的完整热力图分布 (不使用 Top-K)。
+    用于观察 Attention 是否弥散以及具体的关注强度分布。
+
+    Args:
+        attn_weights (torch.Tensor): Shape [1, h, q, n].
+        original_image (torch.Tensor): Shape [1, 3, H, W].
+        h_feat (int): 特征图高度.
+        w_feat (int): 特征图宽度.
+        alpha (float): 热力图透明度 (0.0 - 1.0).
+        colormap (str): Matplotlib colormap.
+    """
+    
+    # --- 1. 基础参数获取 ---
+    b, q, n = attn_weights.shape
+    _, _, H, W = original_image.shape
+    
+    # 移除 batch 维度
+    attn = attn_weights[0] # [h, q, n]
+    
+    # --- 2. 降维聚合 ---
+    # 对 heads 和 queries 取平均，得到全局的空间注意力分布
+    # Shape: [n]
+    attn_averaged = attn.mean(dim=0)
+    
+    # --- 3. 空间重塑 ---
+    # [n] -> [h_feat, w_feat]
+    attn_spatial = attn_averaged.view(h_feat, w_feat)
+    
+    # --- 4. 上采样到原图尺寸 ---
+    # 增加维度以适配 interpolate: [1, 1, h_feat, w_feat]
+    attn_spatial = attn_spatial.unsqueeze(0).unsqueeze(0)
+    
+    # 使用双线性插值 (bilinear) 使得热力图平滑过渡，这能更好体现分布趋势
+    attn_upsampled = F.interpolate(
+        attn_spatial, size=(H, W), mode='bilinear', align_corners=False
+    )
+    
+    # 移除多余维度 -> [H, W]
+    attention_map = attn_upsampled.squeeze()
+    
+    # --- 5. 归一化 (Normalization) ---
+    # 为了让颜色能充分利用 colormap 的范围，我们需要将权重映射到 [0, 1]
+    # 注意：这步操作对于观察"相对强弱"很有用，但会丢失"绝对数值"信息。
+    # 如果所有权重都非常小（例如 1e-5），归一化后看起来也会很红。
+    # 建议配合 print(attention_map.max()) 使用。
+    attn_map_np = attention_map.detach().cpu().numpy()
+    
+    min_val, max_val,avg_val = attn_map_np.min(), attn_map_np.max(), np.mean(attn_map_np)
+    print(f"[Debug] Attention Map Range: Min={min_val:.6f}, Max={max_val:.6f}, Avg={avg_val:.6f}" )
+    
+    if max_val - min_val > 1e-8:
+        attn_norm = (attn_map_np - min_val) / (max_val - min_val)
+    else:
+        attn_norm = attn_map_np # 避免除以0，说明分布完全是平的
+        
+    # --- 6. 图像合成 ---
+    # 6.1 准备原图
+    img_display = original_image[0].clone().detach().cpu()
+    # 简单的 Min-Max 归一化用于显示
+    img_display = (img_display - img_display.min()) / (img_display.max() - img_display.min() + 1e-8)
+    img_np = img_display.permute(1, 2, 0).numpy()
+    
+    # 6.2 生成热力图颜色
+    cmap = plt.get_cmap(colormap)
+    # cmap 返回 RGBA，取前3个通道
+    heatmap_rgb = cmap(attn_norm)[:, :, :3]
+    
+    # 6.3 叠加
+    # 公式: result = img * (1-alpha) + heatmap * alpha
+    overlayed_img = img_np * (1 - alpha) + heatmap_rgb * alpha
+    overlayed_img = np.clip(overlayed_img, 0.0, 1.0)
+    
+    # --- 7. 绘图 ---
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    
+    axes[0].imshow(img_np)
+    axes[0].set_title("Original Image")
+    axes[0].axis('off')
+    
+    # 显示纯热力图 (使用伪彩色)
+    im1 = axes[1].imshow(attn_norm, cmap=colormap)
+    axes[1].set_title("Attention Heatmap (Raw Distribution)")
+    axes[1].axis('off')
+    plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04) # 添加色条
+    
+    axes[2].imshow(overlayed_img)
+    axes[2].set_title(f"Overlay (alpha={alpha})")
+    axes[2].axis('off')
+    
+    plt.tight_layout()
+    if save_path is None:
+        plt.show()
+    else:
+        plt.savefig(save_path)
+
+
 def visualize_cross_attention_topk(
     attn_weights: torch.Tensor,
     original_image: torch.Tensor,
@@ -376,16 +484,25 @@ def visualize_cross_attention_topk(
     else:
         plt.savefig(save_path)
 
-
+from pathlib import Path
 def get_attention_weight(original_image ,save_path):
     def visualHook(module , input , output):
         # queries: torch.Tensor, keys: torch.Tensor, query_pe: torch.Tensor, key_pe: torch.Tensor , h , w
         _,_,_,_,h ,w = input
         # attention weight  : b h q N  -> b N  - > b topk  
         _ , _ , attn_weights = output
-        print(attn_weights.shape)
-        visualize_cross_attention_topk(attn_weights,original_image,h,w,(int)(h*w*0.25),save_path=save_path)
-        
+        # print(attn_weights.shape)
+        b, q, n = attn_weights.shape
+        p = Path(save_path)
+        name = p.name
+        basePath = Path(p.parent)
+
+        for i in range(q):
+            q_save_path = basePath / f"q{i}" 
+            q_save_path.mkdir(parents=True , exist_ok=True)
+            q_save_path = q_save_path / name
+            # visualize_cross_attention_topk(attn_weights,original_image,h,w,(int)(h*w*0.5),save_path=save_path)
+            visualize_attention_heatmap(attn_weights[:,i,:].unsqueeze(1),original_image,h,w,save_path=q_save_path)
     return visualHook
 
 
@@ -393,7 +510,7 @@ import os
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
-    work_dir = "/home/zengshimao/code/RMT/classfication_release/work_dirs/tokengalerkin_v2_fullDatasets"
+    work_dir = "/home/u2023110769/code/RMT/classfication_release/work_dirs/tokengalerkin_v2_full_pre"
     resume = os.path.join(work_dir , "checkpoint.pth")
     
     checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
@@ -406,10 +523,10 @@ if __name__ == '__main__':
     model.eval()
     preprocess = build_transform(False, args)
     images = {
-        "dog1" : "/home/zengshimao/datasets/ImageNet1k/val/n02113712/n02113712_43516.JPEG",
-        "dog2" : "/home/zengshimao/datasets/ImageNet1k/val/n02113712/n02113712_10575.JPEG",
-        "fish" : "/home/zengshimao/datasets/ImageNet1k/val/n01440764/n01440764_2138.JPEG",
-        "bird" : "/home/zengshimao/datasets/ImageNet1k/val/n01440764/n01440764_10306.JPEG"
+        "dog1" : "/home/u2023110769/datasets/ImageNet1k/val/n02113712/n02113712_43516.JPEG",
+        "dog2" : "/home/u2023110769/datasets/ImageNet1k/val/n02113712/n02113712_10575.JPEG",
+        "fish" : "/home/u2023110769/datasets/ImageNet1k/val/n01440764/n01440764_2138.JPEG",
+        "bird" : "/home/u2023110769/datasets/ImageNet1k/val/n01440764/n01440764_10306.JPEG"
     }
     for name , image in images.items():
         visualize_save = os.path.join(work_dir , "mask_visualization", name)
