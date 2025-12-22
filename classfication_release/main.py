@@ -546,7 +546,7 @@ def main(args):
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         test_stats_ema = None
         if model_ema is not None:
-            test_stats_ema = evaluate(data_loader_val, model, device , epochAsArgs=giveEpochAsArgs , epoch = epoch)
+            test_stats_ema = evaluate(data_loader_val, model_ema.ema, device , epochAsArgs=giveEpochAsArgs , epoch = epoch)
             print(f"Accuracy of the network_ema on the {len(dataset_val)} test images: {test_stats_ema['acc1']:.1f}%")
         max_accuracy = max(max_accuracy, test_stats["acc1"])
         if model_ema is not None:
