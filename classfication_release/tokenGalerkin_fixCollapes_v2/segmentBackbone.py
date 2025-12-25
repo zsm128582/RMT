@@ -139,27 +139,6 @@ class TwoWayAttentionBlock(nn.Module):
     def forward(
         self, queries: torch.Tensor, keys: torch.Tensor, query_pe: torch.Tensor, key_pe: torch.Tensor , h , w
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # if self.skip_first_layer_pe:
-        #     """"
-        #             self,
-        # query: Tensor,
-        # key: Tensor,
-        # value: Tensor,
-        # key_padding_mask: Optional[Tensor] = None,
-        # need_weights: bool = True,
-        # attn_mask: Optional[Tensor] = None,
-        # average_attn_weights: bool = True,
-        # is_causal: bool = False,
-        #     """
-        #     queries = self.self_attn(query=queries, key=queries, value=queries,need_weights=False)[0]
-        # else:
-        #     q = queries + query_pe
-        #     attn_out = self.self_attn(query=q, key=q, value=queries,need_weights=False)[0]
-        #     queries = queries + attn_out
-
-        # 使用 after norm 的方式。这里能不能改得现代一点呢？ 
-
-
         keys = self.local_representation(rearrange(keys , "b ( h w ) c -> b c h w" , h = h))
         keys = rearrange(keys , "b c h w -> b (h w ) c")
 

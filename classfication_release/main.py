@@ -16,8 +16,8 @@ from timm.scheduler import create_scheduler
 from timm.optim import create_optimizer
 from timm.utils import NativeScaler, get_state_dict, ModelEma
 
-# from fvcore.nn import FlopCountAnalysis
-# from fvcore.nn import flop_count_table
+from fvcore.nn import FlopCountAnalysis
+from fvcore.nn import flop_count_table
 
 from datasets import build_dataset
 from engine import train_one_epoch, evaluate
@@ -332,13 +332,16 @@ def main(args):
     # flops, params = profile(model, inputs=(input, ))
     # print('flops:{}'.format(flops))
     # print('params:{}'.format(params))
+    # from torchinfo import summary
 
+    # # input_size 需要根据你的模型输入调整 (batch_size, channels, H, W)
+    # summary(model, input_size=(1, 3, 224, 224), depth=7)
 
     # from torchsummary import summary
     # summary(model.to(device), input_size=(3, 224, 224), batch_size=-1)
-    # model.eval()
-    # flops = FlopCountAnalysis(model, torch.rand(1, 3, args.input_size, args.input_size))
-    # print(flop_count_table(flops))
+    model.eval()
+    flops = FlopCountAnalysis(model, torch.rand(1, 3, args.input_size, args.input_size))
+    print(flop_count_table(flops))
 
     if args.finetune:
         checkpoint = torch.load(args.finetune, map_location='cpu')
@@ -496,29 +499,42 @@ def main(args):
         lr_scheduler.step(epoch)
 
         if args.output_dir:
-            checkpoint_paths = [output_dir / 'checkpoint.pth']
-            for checkpoint_path in checkpoint_paths:
-                if args.model_ema:
-                    utils.save_on_master({
-                        'model': model_without_ddp.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'lr_scheduler': lr_scheduler.state_dict(),
-                        'epoch': epoch,
-                        'model_ema': get_state_dict(model_ema),
-                        'scaler': loss_scaler.state_dict(),
-                        'args': args,
-                        'max_accuracy': max_accuracy,
-                    }, checkpoint_path)
-                else:
-                    utils.save_on_master({
-                        'model': model_without_ddp.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'lr_scheduler': lr_scheduler.state_dict(),
-                        'epoch': epoch,
-                        'scaler': loss_scaler.state_dict(),
-                        'args': args,
-                        'max_accuracy': max_accuracy,
-                    }, checkpoint_path)
+            # 1. 定义路径
+            checkpoint_path = output_dir / 'checkpoint.pth'
+            checkpoint_last_path = output_dir / 'checkpoint_last.pth'
+            tmp_path = output_dir / 'checkpoint_tmp.pth' # 临时保存路径
+
+            # 2. 准备保存的内容
+            save_dict = {
+                'model': model_without_ddp.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'lr_scheduler': lr_scheduler.state_dict(),
+                'epoch': epoch,
+                'scaler': loss_scaler.state_dict(),
+                'args': args,
+                'max_accuracy': max_accuracy,
+            }
+            if args.model_ema:
+                save_dict['model_ema'] = get_state_dict(model_ema)
+
+            # 3. 执行原子保存逻辑 (仅在主进程执行)
+            if utils.is_main_process():
+                # a. 如果当前 checkpoint 存在，先将其备份为 last
+                if checkpoint_path.exists():
+                    # 使用 rename 是原子操作，非常快且安全
+                    try:
+                        os.replace(checkpoint_path, checkpoint_last_path)
+                    except Exception as e:
+                        print(f"Warning: Failed to backup checkpoint: {e}")
+
+                # b. 将新数据写入临时文件
+                utils.save_on_master(save_dict, tmp_path)
+
+                # c. 写入成功后，将临时文件重命名为正式文件
+                if tmp_path.exists():
+                    os.replace(tmp_path, checkpoint_path)
+                    print(f"Checkpoint saved to {checkpoint_path}")
+
             if epoch % 30 == 0:
                 if args.model_ema:
                     utils.save_on_master({
