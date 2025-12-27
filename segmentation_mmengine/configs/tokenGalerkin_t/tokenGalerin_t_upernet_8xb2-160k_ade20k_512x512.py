@@ -1,10 +1,9 @@
 _base_ = [
-    "../BiUnet/engineVersion.py"
+    '../swin/swin-tiny-patch4-window7-in1k-pre_upernet_8xb2-160k_ade20k-512x512.py'
 ]
-
+checkpoint="/home/u2023110769/code/RMT/segmentation_mmengine/work_dirs/tokenGalerkin_v2_e250.pth"
 model = dict(
     backbone=dict(
-        _delete_ = True,
         chunkwise_recurrents=[
             True,
             True,
@@ -31,8 +30,7 @@ model = dict(
             6,
         ],
         init_cfg=dict(
-            checkpoint=
-            "/home/zengshimao/code/RMT/classfication_release/work_dirs/tokengalerkin_fixCollapse_t_v2/best.pth",
+            checkpoint=checkpoint,
             type='Pretrained'),
         init_values=[
             2,
@@ -65,4 +63,18 @@ model = dict(
             3,
         ),
         type='tokenNet'),
+        decode_head=dict(in_channels=[64, 128, 256, 512], num_classes=150),
+        auxiliary_head=dict(
+            align_corners=False,
+            channels=256,
+            concat_input=False,
+            dropout_ratio=0.1,
+            in_channels=256,
+            in_index=2,
+            loss_decode=dict(
+                loss_weight=0.4, type='CrossEntropyLoss', use_sigmoid=False),
+            norm_cfg=dict(requires_grad=True, type='SyncBN'),
+            num_classes=150,
+            num_convs=1,
+            type='FCNHead'),
 )
