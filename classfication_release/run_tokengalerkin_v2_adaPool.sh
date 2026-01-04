@@ -1,0 +1,1 @@
+torchrun --nproc_per_node=4  main.py --warmup-epochs 5 --model tokenGalerkin_v2_adaPool   --data-path /home/u2023110769/datasets/ImageNet1k/ --data-set IMNET_SUBSET --sub-classes 100 --num_workers 16  --batch-size 128  --drop-path 0.05  --epoch 200 --dist-eval  --output_dir /home/u2023110769/code/RMT/classfication_release/work_dirs/tokenGalerkin_v2_adaPool

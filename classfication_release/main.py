@@ -53,6 +53,9 @@ from agentAttention.agent_swin import agentSwinTransformer_t
 from tokenGalerkin_v2_channelConcat.segmentBackbone import tokengalerkin_channelConcat_t_v2
 from tokenGalerkin_v3_lessWeight.segmentBackbone import tokengalerkin_v3_lessweight_t
 from tokenGalerkin_hybrid_v2.segmentBackbone import tokengalerkin_v2_hybrid
+from tokenGalerkin_v2_AdaptivePool.segmentBackbone import tokenGalerkin_v2_adaPool
+from tokenGalerkin_v2_AdaptivePool_bidirec.segmentBackbone import tokenGalerkin_v2_adaPool_bidirect
+from tokenGalerkin_v2_fixWeightDecay.segmentBackbone import tokengalerkin_v2_t_fixWeightDecay
 archs = {
             'RMT_T': RMT_T3,
             # 'RMT_S': RMT_S,
@@ -80,7 +83,10 @@ archs = {
             "agentSwinTransformer_t":agentSwinTransformer_t,
             'tokengalerkin_channelConcat_t_v2':tokengalerkin_channelConcat_t_v2,
             'tokengalerkin_v3_lessweight_t':tokengalerkin_v3_lessweight_t,
-            'tokengalerkin_v2_hybrid':tokengalerkin_v2_hybrid
+            'tokengalerkin_v2_hybrid':tokengalerkin_v2_hybrid,
+            'tokenGalerkin_v2_adaPool':tokenGalerkin_v2_adaPool,
+            'tokenGalerkin_v2_adaPool_bidirect':tokenGalerkin_v2_adaPool_bidirect,
+            'tokengalerkin_v2_t_fixWeightDecay':tokengalerkin_v2_t_fixWeightDecay
             # 'Restormer' : Restormer_default,
             # 'Utentive' : Utentive_default,
             # 'Half' : HalfRestomer_defalt
@@ -345,11 +351,13 @@ def main(args):
         model.load_state_dict(checkpoint['model'], strict=True)
 
     if args.loadfrom:
-        print("load from",args.loadfrom)
+        print("load parameters from",args.loadfrom)
         checkpoint = torch.load(args.loadfrom,map_location='cpu',weights_only=False)
         missingkeys , unexpect = model.load_state_dict(checkpoint['model'],strict=False)
         print("Missing keys:", missingkeys)  # 这些是 B 需要但 A 没有的参数
         print("Unexpected keys:", unexpect)  # 这些是 A 里有但 B 不需要的参数
+
+
 
     if args.hook:
         def hook_fn(module, input, output):
@@ -385,6 +393,19 @@ def main(args):
     linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
     args.lr = linear_scaled_lr
     optimizer = create_optimizer(args, model_without_ddp)
+    # print(" no weight decay params")
+    # # 检查 agents 是否真的被归类到了 weight_decay=0 的组里
+    # for i, group in enumerate(optimizer.param_groups):
+    #     if group['weight_decay'] == 0.0:
+    #         # 检查这一组里有没有 agents 的参数张量
+    #         for p in group['params']:
+    #             if p is model_without_ddp.agents:
+    #                 print("agents 已经被weight decay 豁免")
+    #             if p is model_without_ddp.layers[0].blocks[0].cross_attn_image_to_token.kln.weight:
+    #                 print("galerkin layernorm 已经被weight decay 豁免")
+    #             if p is model_without_ddp.layers[0].q_pos:
+    #                 print("agents pos 已经被weight decay 豁免")
+
     loss_scaler = NativeScaler()
 
     lr_scheduler, _ = create_scheduler(args, optimizer)
@@ -392,6 +413,11 @@ def main(args):
 
     criterion = LabelSmoothingCrossEntropy()
 
+    if args.loadfrom:
+        print("load optimizer from",args.loadfrom)
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        if 'scaler' in checkpoint:
+            loss_scaler.load_state_dict(checkpoint['scaler'])
     if args.mixup > 0.:
         # smoothing is handled with mixup label transform
         criterion = SoftTargetCrossEntropy()
@@ -440,8 +466,11 @@ def main(args):
         else:
             checkpoint = torch.load(args.resume, map_location='cpu',weights_only=False)
         model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
-        if args.model_ema:                
-            model_ema.ema.load_state_dict(checkpoint['model_ema'], strict=True)
+        if args.model_ema:    
+            if 'model_ema' in checkpoint:            
+                model_ema.ema.load_state_dict(checkpoint['model_ema'], strict=True)
+            else :
+                model_ema.ema.load_state_dict(checkpoint['model'] , strict=True)
                
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
@@ -545,7 +574,7 @@ def main(args):
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         test_stats_ema = None
         if model_ema is not None:
-            test_stats_ema = evaluate(data_loader_val, model, device , epochAsArgs=giveEpochAsArgs , epoch = epoch)
+            test_stats_ema = evaluate(data_loader_val, model_ema.ema, device , epochAsArgs=giveEpochAsArgs , epoch = epoch)
             print(f"Accuracy of the network_ema on the {len(dataset_val)} test images: {test_stats_ema['acc1']:.1f}%")
         max_accuracy = max(max_accuracy, test_stats["acc1"])
         if model_ema is not None:

@@ -361,6 +361,8 @@ def visualize_attention_heatmap(
         plt.show()
     else:
         plt.savefig(save_path)
+    plt.close()
+        
 
 
 def visualize_cross_attention_topk(
@@ -496,13 +498,13 @@ def get_attention_weight(original_image ,save_path):
         p = Path(save_path)
         name = p.name
         basePath = Path(p.parent)
-
-        for i in range(q):
-            q_save_path = basePath / f"q{i}" 
-            q_save_path.mkdir(parents=True , exist_ok=True)
-            q_save_path = q_save_path / name
-            # visualize_cross_attention_topk(attn_weights,original_image,h,w,(int)(h*w*0.5),save_path=save_path)
-            visualize_attention_heatmap(attn_weights[:,i,:].unsqueeze(1),original_image,h,w,save_path=q_save_path)
+        visualize_attention_heatmap(attn_weights,original_image,h,w,save_path=save_path)
+        # for i in range(q):
+        #     q_save_path = basePath / f"q{i}" 
+        #     q_save_path.mkdir(parents=True , exist_ok=True)
+        #     q_save_path = q_save_path / name
+        #     # visualize_cross_attention_topk(attn_weights,original_image,h,w,(int)(h*w*0.5),save_path=save_path)
+        #     visualize_attention_heatmap(attn_weights[:,i,:].unsqueeze(1),original_image,h,w,save_path=q_save_path)
     return visualHook
 
 
@@ -510,11 +512,11 @@ import os
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DeiT training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
-    work_dir = "/home/u2023110769/code/RMT/classfication_release/work_dirs/tokengalerkin_v2_full_pre"
+    work_dir = "/home/u2023110769/code/RMT/classfication_release/work_dirs/tokengalerkin_v2_t_fixWeightDecay"
     resume = os.path.join(work_dir , "checkpoint.pth")
     
     checkpoint = torch.load(resume, map_location='cpu',weights_only=False)
-    args.nb_classes = 1000
+    args.nb_classes = 100
     model = tokengalerkin_fixCollapse_t_v2(args)
     depths=[2,2,8,2]
     # model = VisSegNet_argmax_S(args)
@@ -523,10 +525,20 @@ if __name__ == '__main__':
     model.eval()
     preprocess = build_transform(False, args)
     images = {
-        "dog1" : "/home/u2023110769/datasets/ImageNet1k/val/n02113712/n02113712_43516.JPEG",
-        "dog2" : "/home/u2023110769/datasets/ImageNet1k/val/n02113712/n02113712_10575.JPEG",
-        "fish" : "/home/u2023110769/datasets/ImageNet1k/val/n01440764/n01440764_2138.JPEG",
-        "bird" : "/home/u2023110769/datasets/ImageNet1k/val/n01440764/n01440764_10306.JPEG"
+        # "dog1" : "/home/u2023110769/datasets/ImageNet1k/val/n02113712/n02113712_43516.JPEG",
+        # "dog2" : "/home/u2023110769/datasets/ImageNet1k/val/n02113712/n02113712_10575.JPEG",
+        # "fish" : "/home/u2023110769/datasets/ImageNet1k/val/n01440764/n01440764_2138.JPEG",
+        # "bird" : "/home/u2023110769/datasets/ImageNet1k/val/n01440764/n01440764_10306.JPEG"
+        # "car" : "/home/u2023110769/datasets/ImageNet1k/val/n03769881/n03769881_1178.JPEG",
+        # "car2":"/home/u2023110769/datasets/ImageNet1k/val/n03769881/n03769881_22551.JPEG"
+        "car3":"/home/u2023110769/datasets/ImageNet1k/val/n03769881/n03769881_11715.JPEG"
+        # "slug" : "/home/u2023110769/datasets/ImageNet1k/val/n01945685/n01945685_7753.JPEG",
+        # "cat" : "/home/u2023110769/datasets/ImageNet1k/val/n02123045/n02123045_43014.JPEG",
+        # "dog" : "/home/u2023110769/datasets/ImageNet1k/val/n02110185/n02110185_14542.JPEG",
+        
+
+
+
     }
     for name , image in images.items():
         visualize_save = os.path.join(work_dir , "mask_visualization", name)

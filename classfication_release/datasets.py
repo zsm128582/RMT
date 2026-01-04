@@ -64,6 +64,8 @@ class ImageNetSubset(datasets.ImageFolder):
         # print("*"*30+str(num_classes))
         # print(all_classes)
         selected_classes = rng.sample(all_classes, num_classes)
+        print("select classes:")
+        print(selected_classes)
         selected_classes = sorted(selected_classes)
 
         # 构造新的 class_to_idx
