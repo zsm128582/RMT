@@ -8,6 +8,7 @@ import torch.backends.cudnn as cudnn
 import json
 
 from pathlib import Path
+from torch.utils.tensorboard import SummaryWriter
 
 from timm.data import Mixup
 from timm.models import create_model
@@ -270,7 +271,7 @@ def main(args):
     torch.manual_seed(seed)
     np.random.seed(seed)
     # random.seed(seed)
-
+    writer = SummaryWriter(args.output_dir) if utils.is_main_process() else None
     cudnn.benchmark = True
 
     dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
@@ -526,7 +527,8 @@ def main(args):
             optimizer, device, epoch, loss_scaler,
             args.clip_grad, model_ema, mixup_fn,
             set_training_mode=args.finetune=='',  # keep in eval mode during finetuning
-            giveEpochAsArgs = giveEpochAsArgs
+            giveEpochAsArgs = giveEpochAsArgs,
+            writer = writer
         )
 
         lr_scheduler.step(epoch)
@@ -635,6 +637,9 @@ def main(args):
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
+
+    if utils.is_main_process() :
+        writer.close()
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

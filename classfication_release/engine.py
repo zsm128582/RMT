@@ -11,6 +11,7 @@ import torch
 
 from timm.data import Mixup
 from timm.utils import accuracy, ModelEma
+from torch.utils.tensorboard import SummaryWriter
 
 from losses import DistillationLoss
 import utils
@@ -20,7 +21,7 @@ def train_one_epoch(lr_scheduler, model: torch.nn.Module, criterion: Distillatio
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,                    
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,                    
-                    set_training_mode=True , giveEpochAsArgs = False):
+                    set_training_mode=True , giveEpochAsArgs = False , writer:SummaryWriter = None ):
     model.train(set_training_mode)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -62,9 +63,12 @@ def train_one_epoch(lr_scheduler, model: torch.nn.Module, criterion: Distillatio
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-        # idx += 1
-        # if idx >= 5:
-        #     break
+
+    if  utils.is_main_process() :
+        for name , param in model.named_parameters():
+            if param.grad is not None:
+                writer.add_histogram(f'gradients/{name}', param.grad, epoch)
+        # idx = idx + 1
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
