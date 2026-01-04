@@ -431,8 +431,10 @@ class VisSegNet(nn.Module):
         nwd = {'absolute_pos_embed', 'agents'}
         # 扫描整个模型的所有参数名
         for name, _ in self.named_parameters():
-            if 'q_pos' or 'kln' or 'vln' in name:
+            if ('q_pos' in name) or ('kln' in name) or ('vln' in name):
                 nwd.add(name)
+        print("params for no weight decay")
+        print(nwd)
         return nwd
 
     @torch.jit.ignore

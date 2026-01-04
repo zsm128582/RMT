@@ -397,11 +397,63 @@ def main(args):
     linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
     args.lr = linear_scaled_lr
     optimizer = create_optimizer(args, model_without_ddp)
+    ######******************下面这一段代码用于将agents 单独设置成更高的学习率
+    target_param = model_without_ddp.agents
+    target_lr = args.lr * 2
+    new_groups = []
+    special_group = {
+        'params': [target_param],
+        'lr': target_lr,
+        # weight_decay 我们稍后从原分组继承，或者你可以强制写死
+    }
+    found_target = False
+
+    for i, group in enumerate(optimizer.param_groups):
+        # 检查 target_param 是否当前组的参数列表中
+        # 注意：必须使用 'is' 来判断对象是否是同一个 tensor
+        if any(p is target_param for p in group['params']):
+            print(f"Found 'agents' in group {i}, extracting it...")
+            found_target = True
+            
+            # A. 继承原有的 weight_decay 设置 (这很关键，因为 timm 已经识别了它是否该 decay)
+            if 'weight_decay' in group:
+                special_group['weight_decay'] = group['weight_decay']
+                print(f"  -> Inherited weight_decay: {special_group['weight_decay']}")
+                
+            # B. 从当前组中剔除 agents
+            # 创建一个新的列表，保留除了 agents 以外的所有参数
+            cleaned_params = [p for p in group['params'] if p is not target_param]
+            
+            # 复制该组的配置，但使用剔除后的参数列表
+            new_group = group.copy()
+            new_group['params'] = cleaned_params
+            new_groups.append(new_group)
+            
+        else:
+            # 如果这个组里没有 agents，直接原样保留
+            new_groups.append(group)
+
+    # 4. 把我们的特权组加进去
+    if found_target:
+        new_groups.append(special_group)
+    else:
+        print("Warning: 'agents' parameter was not found in any optimizer group!")
+    
+    optimizer = create_optimizer(args,new_groups,filter_bias_and_bn=True )
+    
     for i, group in enumerate(optimizer.param_groups):
         param_len = len(group['params'])
         lr = group['lr']
         wd = group.get('weight_decay', 'default')
         print(f"Group {i}: {param_len} params, LR={lr}, WD={wd}")
+
+
+
+
+    ######******************上面一段代码用于将agents 单独设置成更高的学习率
+
+
+    
     # print(" no weight decay params")
     # # 检查 agents 是否真的被归类到了 weight_decay=0 的组里
     # for i, group in enumerate(optimizer.param_groups):
