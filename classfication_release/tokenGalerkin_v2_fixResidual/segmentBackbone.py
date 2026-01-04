@@ -116,8 +116,6 @@ class TwoWayAttentionBlock(nn.Module):
 
         self.local_representation = SwiftFormerLocalRepresentation(dim = embedding_dim ,kernel_size=3 , drop_path=0.0 , use_layer_scale=True )
 
-        # 原文中，这里要对qkv的c做压缩，做完attention后再复原回来。。但我感觉这样损失信息太多了，暂时不采用
-        # self.self_attn = nn.MultiheadAttention(embedding_dim, num_heads,batch_first=True)
         self.norm1 = nn.LayerNorm(embedding_dim)
 
         self.cross_attn_token_to_image = nn.MultiheadAttention(embedding_dim, num_heads,batch_first=True)
@@ -127,9 +125,8 @@ class TwoWayAttentionBlock(nn.Module):
             embedding_dim, mlp_dim, embedding_dim, num_layers=2, activation=activation
         )
         self.norm3 = nn.LayerNorm(embedding_dim)
+        self.norm4 = nn.LayerNorm(embedding_dim)
 
-        # self.norm4 = nn.LayerNorm(embedding_dim)
-        # self.cross_attn_image_to_token = nn.MultiheadAttention(embedding_dim, num_heads,batch_first=True)
         self.cross_attn_image_to_token = simple_attn(embedding_dim , num_heads)
 
         self.skip_first_layer_pe = skip_first_layer_pe
@@ -137,36 +134,33 @@ class TwoWayAttentionBlock(nn.Module):
 
 
     def forward(
-        self, queries: torch.Tensor, keys: torch.Tensor, query_pe: torch.Tensor, key_pe: torch.Tensor , h , w
+        self, agent: torch.Tensor, imgs: torch.Tensor, agent_pe: torch.Tensor, imgs_pe: torch.Tensor , h , w
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        keys = self.local_representation(rearrange(keys , "b ( h w ) c -> b c h w" , h = h))
-        keys = rearrange(keys , "b c h w -> b (h w ) c")
-
-
-
-        # queries = self.norm1(queries)
-        # Cross attention block, tokens attending to image embedding
-        q = queries + query_pe
-        k = keys + key_pe
-        attn_out , attn_weight = self.cross_attn_token_to_image(query= self.norm1(q), key=self.norm2(k), value=keys,need_weights=True)
-
-        queries = queries + attn_out
-
-        # # MLP block
-        # mlp_out = self.mlp(queries)
-        # queries = queries + mlp_out
-        # queries = self.norm3(queries)
-
-        q = queries + query_pe
-        # k = keys + key_pe # 图像
-        attn_out = self.cross_attn_image_to_token(x = keys , token = q)
-        keys = keys + attn_out
-
-        keys =  keys + self.mlp(self.norm3(keys))
-
         
+        imgs = self.local_representation(rearrange(imgs , "b ( h w ) c -> b c h w" , h = h))
+        imgs = rearrange(imgs , "b c h w -> b (h w ) c")
 
-        return queries, keys,attn_weight
+        agent_res = agent
+        norm_q = self.norm1(agent + agent_pe)
+        norm_k = self.norm1(imgs + imgs_pe)
+        norm_value = self.norm1(imgs)
+        attn_out = self.cross_attn_token_to_image(query= norm_q, key=norm_k, value=norm_value,need_weights=False)[0]
+        agent = agent_res + attn_out
+
+        agent_res = agent
+        agent = agent_res + self.mlp(self.norm2(agent))
+
+        imgs_res = imgs
+        norm_token = self.norm3(agent + agent_pe)
+        norm_imgs = self.norm3(imgs)
+        attn_out = self.cross_attn_image_to_token(x = norm_imgs , token = norm_token)
+        imgs = imgs_res + attn_out
+        
+        imgs_res = imgs
+        imgs =  imgs_res + self.mlp(self.norm4(imgs))
+
+        return agent, imgs
+
 class ConvEncoder(nn.Module):
     """
     Implementation of ConvEncoder with 3*3 and 1*1 convolutions.
@@ -255,7 +249,7 @@ class TokenAttentionLayer(nn.Module):
 
 
         for index , blk in enumerate(self.blocks):
-            queries , keys  , _  = blk(queries  , keys,  self.q_pos ,  image_pos , h , w )
+            queries , keys   = blk(queries  , keys,  self.q_pos ,  image_pos , h , w )
         
         queries = queries + queries_embedding
         x = keys + x
@@ -446,7 +440,7 @@ class VisSegNet(nn.Module):
 
 
 @register_model
-def tokengalerkin_fixCollapse_t_v2(args):
+def tokengalerkin_v2_fixResidual(args):
     model = VisSegNet(
         num_classes= args.nb_classes,
         embed_dims=[64, 128, 256, 512],
@@ -463,38 +457,4 @@ def tokengalerkin_fixCollapse_t_v2(args):
     return model
 
 
-@register_model
-def tokengalerkin_fixCollapse_s_v2(args):
-    model = VisSegNet(
-        num_classes= args.nb_classes,
-        embed_dims=[64, 128, 256, 512],
-        depths=[3,4,12,4],
-        num_heads=[4, 4, 8, 16],
-        init_values=[2, 2, 2, 2],
-        heads_ranges=[4, 4, 6, 6],
-        mlp_ratios=[4, 4, 3, 3],
-        drop_path_rate=0.1,
-        chunkwise_recurrents=[True, True, True, False],
-        layerscales=[False, False, False, False]
-    )
-    model.default_cfg = _cfg()
-    return model
 
-
-@register_model
-def tokengalerkin_fixCollapse_t_v2_30q(args):
-    model = VisSegNet(
-        num_classes= args.nb_classes,
-        embed_dims=[64, 128, 256, 512],
-        depths=[2,2,8,2],
-        num_heads=[4, 4, 8, 16],
-        init_values=[2, 2, 2, 2],
-        heads_ranges=[4, 4, 6, 6],
-        mlp_ratios=[3, 3, 3, 3],
-        drop_path_rate=0.1,
-        chunkwise_recurrents=[True, True, True, False],
-        layerscales=[False, False, False, False],
-        num_q = 30
-    )
-    model.default_cfg = _cfg()
-    return model
