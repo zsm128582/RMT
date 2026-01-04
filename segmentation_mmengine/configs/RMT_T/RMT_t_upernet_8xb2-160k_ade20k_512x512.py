@@ -1,0 +1,81 @@
+_base_ = [
+    '../swin/swin-tiny-patch4-window7-in1k-pre_upernet_8xb2-160k_ade20k-512x512.py'
+]
+checkpoint="/home/u2023110769/code/RMT/segmentation_mmengine/checkpoint/RMT-T.pth"
+model = dict(
+    backbone=dict(
+        _delete_ = True,
+        chunkwise_recurrents=[
+            True,
+            True,
+            True,
+            False,
+        ],
+        depths=[
+            2,
+            2,
+            8,
+            2,
+        ],
+        drop_path_rate=0.15,
+        embed_dims=[
+            64,
+            128,
+            256,
+            512,
+        ],
+        heads_ranges=[
+            4,
+            4,
+            6,
+            6,
+        ],
+        init_cfg=dict(
+            checkpoint=checkpoint,
+            type='Pretrained'),
+        init_values=[
+            2,
+            2,
+            2,
+            2,
+        ],
+        layerscales=[
+            False,
+            False,
+            False,
+            False,
+        ],
+        mlp_ratios=[
+            3,
+            3,
+            3,
+            3,
+        ],
+        num_heads=[
+            4,
+            4,
+            8,
+            16,
+        ],
+        out_indices=(
+            0,
+            1,
+            2,
+            3,
+        ),
+        type='VisRetNet'),
+        decode_head=dict(in_channels=[64, 128, 256, 512], num_classes=150),
+        auxiliary_head=dict(
+            align_corners=False,
+            channels=256,
+            concat_input=False,
+            dropout_ratio=0.1,
+            in_channels=256,
+            in_index=2,
+            loss_decode=dict(
+                loss_weight=0.4, type='CrossEntropyLoss', use_sigmoid=False),
+            norm_cfg=dict(requires_grad=True, type='SyncBN'),
+            num_classes=150,
+            num_convs=1,
+            type='FCNHead'),
+)

@@ -9,6 +9,7 @@ from mmengine.logging import print_log
 from mmengine.runner import Runner
 from mmseg.registry import RUNNERS
 from models.tokenGalerkinV2.segmentBackbone import tokenNet
+from models.RMT.RMT import VisRetNet
 # do nothing ，只是为了让系统扫描到这个文件，然后registry上
 # from BiUnet.BiUnet import  BiUnet
 # from RMT import RMT
