@@ -189,6 +189,7 @@ class TwoWayAttentionBlock(nn.Module):
             embedding_dim, mlp_dim, embedding_dim, num_layers=2, activation=activation
         )
         self.norm3 = nn.LayerNorm(embedding_dim)
+        self.norm4 = nn.LayerNorm(embedding_dim)
 
         self.cross_attn_image_to_token = simple_attn(embedding_dim , num_heads)
 
@@ -197,30 +198,33 @@ class TwoWayAttentionBlock(nn.Module):
 
 
     def forward(
-        self, queries: torch.Tensor, keys: torch.Tensor, query_pe: torch.Tensor, key_pe: torch.Tensor , h , w
+        self, agent: torch.Tensor, imgs: torch.Tensor, agent_pe: torch.Tensor, imgs_pe: torch.Tensor , h , w
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         
-        keys = self.local_representation(rearrange(keys , "b ( h w ) c -> b c h w" , h = h))
-        keys = rearrange(keys , "b c h w -> b (h w ) c")
+        imgs = self.local_representation(rearrange(imgs , "b ( h w ) c -> b c h w" , h = h))
+        imgs = rearrange(imgs , "b c h w -> b (h w ) c")
 
+        agent_res = agent
+        norm_q = self.norm1(agent + agent_pe)
+        norm_k = self.norm1(imgs + imgs_pe)
+        norm_value = self.norm1(imgs)
+        attn_out = self.cross_attn_token_to_image(query= norm_q, key=norm_k, value=norm_value,need_weights=False)[0]
+        agent = agent_res + attn_out
 
-        q = queries + query_pe
-        k = keys + key_pe
-        attn_out = self.cross_attn_token_to_image(query= self.norm1(q), key=self.norm2(k), value=keys,need_weights=False)[0]
+        agent_res = agent
+        agent = agent_res + self.mlp(self.norm2(agent))
 
-        queries = queries + attn_out
-
-
-        q = queries + query_pe
-
-        attn_out = self.cross_attn_image_to_token(x = keys , token = q)
-        keys = keys + attn_out
-
-        keys =  keys + self.mlp(self.norm3(keys))
-
+        imgs_res = imgs
+        norm_token = self.norm3(agent + agent_pe)
+        norm_imgs = self.norm3(imgs)
+        attn_out = self.cross_attn_image_to_token(x = norm_imgs , token = norm_token)
+        imgs = imgs_res + attn_out
         
+        imgs_res = imgs
+        imgs =  imgs_res + self.mlp(self.norm4(imgs))
 
-        return queries, keys
+        return agent, imgs
+    
     
 
 class ConvEncoder(nn.Module):

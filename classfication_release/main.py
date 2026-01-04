@@ -346,7 +346,7 @@ def main(args):
 
     if args.loadfrom:
         print("load from",args.loadfrom)
-        checkpoint = torch.load(args.loadfrom,map_location='cpu')
+        checkpoint = torch.load(args.loadfrom,map_location='cpu',weights_only=False)
         missingkeys , unexpect = model.load_state_dict(checkpoint['model'],strict=False)
         print("Missing keys:", missingkeys)  # 这些是 B 需要但 A 没有的参数
         print("Unexpected keys:", unexpect)  # 这些是 A 里有但 B 不需要的参数
@@ -377,7 +377,7 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
@@ -474,7 +474,7 @@ def main(args):
         test_stats = evaluate(data_loader_val, model, device , epochAsArgs=giveEpochAsArgs , epoch = args.resume_epoch)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         if model_ema is not None:
-            test_stats_ema = evaluate(data_loader_val, model, device , epochAsArgs=giveEpochAsArgs , epoch = args.resume_epoch)
+            test_stats_ema = evaluate(data_loader_val, model_ema.ema, device , epochAsArgs=giveEpochAsArgs , epoch = args.resume_epoch)
             print(f"Accuracy of the network_ema on the {len(dataset_val)} test images: {test_stats_ema['acc1']:.1f}%")
         return
 
