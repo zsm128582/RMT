@@ -551,6 +551,7 @@ class VisRetNet(BaseModule):
             self.extra_norms.append(nn.LayerNorm(embed_dims[i]))
         self.norm_eval = norm_eval
         self.apply(self._init_weights)
+        
     def train(self, mode=True):
         # print("__fuck__"*20)
         """Convert the model into training mode while keep normalization layer

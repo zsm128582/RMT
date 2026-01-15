@@ -5,7 +5,8 @@ import os.path as osp
 
 from mmengine.config import Config, DictAction
 from mmengine.runner import Runner
-import model
+from models.RMT.RMT import VisRetNet
+# import model
 
 # TODO: support fuse_conv_bn, visualization, and format_only
 def parse_args():
