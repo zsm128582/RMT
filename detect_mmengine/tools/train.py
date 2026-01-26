@@ -9,6 +9,7 @@ from mmengine.runner import Runner
 
 from mmdet.utils import setup_cache_size_limit_of_dynamo
 from models.tokenGalerkinV2.segmentBackbone import tokenNet
+from models.RMT.RMT_T import VisRetNet
 # import model
 
 
