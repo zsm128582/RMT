@@ -168,6 +168,9 @@ def get_args_parser():
                         help='patience epochs for Plateau LR scheduler (default: 10')
     parser.add_argument('--decay-rate', '--dr', type=float, default=0.1, metavar='RATE',
                         help='LR decay rate (default: 0.1)')
+    parser.add_argument('--accum_iter', type=int, default=1, metavar='N',
+                        help='accumulate gradients')
+    
 
     # Augmentation parameters
     parser.add_argument('--color-jitter', type=float, default=0.4, metavar='PCT',
@@ -394,8 +397,8 @@ def main(args):
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
-
-    linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
+    eff_bs = args.batch_size * utils.get_world_size() * args.accum_iter
+    linear_scaled_lr = args.lr * eff_bs  / 512.0
     args.lr = linear_scaled_lr
     optimizer = create_optimizer(args, model_without_ddp)
     for i, group in enumerate(optimizer.param_groups):
@@ -528,7 +531,8 @@ def main(args):
             args.clip_grad, model_ema, mixup_fn,
             set_training_mode=args.finetune=='',  # keep in eval mode during finetuning
             giveEpochAsArgs = giveEpochAsArgs,
-            writer = writer
+            writer = writer,
+            accum_iter=args.accum_iter
         )
 
         lr_scheduler.step(epoch)

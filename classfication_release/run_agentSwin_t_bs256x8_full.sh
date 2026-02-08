@@ -1,0 +1,2 @@
+# export output_dir="/home/u2023110769/code/RMT/classfication_release/work_dirs/tokenSam2_t_bs128x4_full"
+torchrun --nproc_per_node=1  main.py --warmup-epochs 10 --model agentSwinTransformer_t --data-path /home/u2023110769/datasets/ImageNet1k/  --num_workers 16  --batch-size 256  --drop-path 0.05  --epoch 300 --accum_iter 8  --dist-eval  --output_dir /home/u2023110769/code/RMT/classfication_release/work_dirs/agentSwinTransformer_t_bs256x4_full >> /home/u2023110769/code/RMT/classfication_release/work_dirs/agentSwinTransformer_t_bs256x4_full/running.log 2>&1 

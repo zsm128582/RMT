@@ -21,17 +21,16 @@ def train_one_epoch(lr_scheduler, model: torch.nn.Module, criterion: Distillatio
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,                    
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,                    
-                    set_training_mode=True , giveEpochAsArgs = False , writer:SummaryWriter = None ):
+                    set_training_mode=True , giveEpochAsArgs = False , writer:SummaryWriter = None,accum_iter: int = 1 ):
     model.train(set_training_mode)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 30
-    
-    num_steps = len(data_loader)
-    idx = 0
 
-    for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
+    optimizer.zero_grad() # 确保在循环开始前梯度清零
+
+    for data_iter_step,(samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
@@ -46,20 +45,38 @@ def train_one_epoch(lr_scheduler, model: torch.nn.Module, criterion: Distillatio
             loss = criterion(samples, outputs, targets)
 
         loss_value = loss.item()
+        loss /= accum_iter
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
+        
+        is_updating_step = (data_iter_step + 1) % accum_iter == 0
 
-        optimizer.zero_grad()
+        if hasattr(model, 'no_sync') and not is_updating_step:
+            with model.no_sync():
+                loss_scaler(loss, optimizer, clip_grad=max_norm,
+                            parameters=model.parameters(), create_graph=False,
+                            need_update=False) # 只 backward，不 step
+        else:
+            # 在更新步，触发同步、剪裁梯度并更新参数
+            is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
+            loss_scaler(loss, optimizer, clip_grad=max_norm,
+                        parameters=model.parameters(), create_graph=is_second_order,
+                        need_update=True) # 执行 step 和 update
+            
+            optimizer.zero_grad() # 更新后清空梯度
+            if model_ema is not None:
+                model_ema.update(model)
+        # optimizer.zero_grad()
 
-        # this attribute is added by timm on one optimizer (adahessian)
-        is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-        loss_scaler(loss, optimizer, clip_grad=max_norm,
-                    parameters=model.parameters(), create_graph=is_second_order)
+        # # this attribute is added by timm on one optimizer (adahessian)
+        # is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
+        # loss_scaler(loss, optimizer, clip_grad=max_norm,
+        #             parameters=model.parameters(), create_graph=is_second_order)
         torch.cuda.synchronize()
-        if model_ema is not None:
-            model_ema.update(model)
+        # if model_ema is not None:
+        #     model_ema.update(model)
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
@@ -68,7 +85,6 @@ def train_one_epoch(lr_scheduler, model: torch.nn.Module, criterion: Distillatio
         for name , param in model.named_parameters():
             if param.grad is not None:
                 writer.add_histogram(f'gradients/{name}', param.grad, epoch)
-        # idx = idx + 1
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
